@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 import os
 from pathlib import Path
 import shutil
 import sys
 import threading
+from functools import lru_cache
 from typing import Any
 
 MIN_CAPABILITY = (8, 9)         # FP8 MMA and e4m3 conversions (Ada); kernels with clusters use them from 9.0
@@ -16,16 +16,52 @@ CLUSTERS = (9, 0)               # extensions built only on thread-block clusters
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
 LOCK_WAIT_SECONDS = 60.0        # a start still waiting on the same lock this long says so again
 
+@lru_cache(maxsize=1)
+def hip() -> bool:
+    """Whether torch runs on ROCm: its ``torch.cuda`` then drives an AMD GPU and extensions build with hipcc."""
 
-def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = False) -> list[str]:
-    """nvcc flags for this GPU alone (``arch_specific``: its ``a`` target); a GPU under ``need`` is refused by name."""
+    try:
+        import torch
+    except ImportError:
+        return False
+    return getattr(torch.version, "hip", None) is not None
+
+
+def hip_arch() -> str:
+    """The AMD GPU's architecture as hipcc names it, e.g. ``gfx1201`` (feature suffixes dropped); without a visible
+    GPU, the first of ``PYTORCH_ROCM_ARCH`` (a build-only host)."""
 
     import torch
 
-    from .rocm import HIP, offload_arch
+    if not torch.cuda.is_available() and os.environ.get("PYTORCH_ROCM_ARCH"):
+        return os.environ["PYTORCH_ROCM_ARCH"].replace(",", ";").split(";")[0].strip()
+    from .rocm import offload_arch
 
-    if HIP:                                         # hipcc: one AMD target; the portable paths avoid clusters and FP8 MMA
-        return [f"--offload-arch={offload_arch()}"]
+    return offload_arch()
+
+
+@lru_cache(maxsize=1)                               # a process's GPU: read once (the decode path asks per call)
+def gfx12() -> bool:
+    """Whether torch drives an AMD gfx12 GPU (RDNA4, e.g. the R9700's gfx1201): the ROCm WMMA kernels
+    (``qmm_rocm.cu``, ``attention_rocm.cu``) and FP8 matrix instructions need its ``*_gfx12`` builtins. Other AMD GPUs
+    take the portable path; False on NVIDIA and on a ROCm host that shows no GPU and names no target."""
+
+    if not hip():
+        return False
+    try:
+        return hip_arch().startswith("gfx12")
+    except (AssertionError, RuntimeError):
+        return False
+
+
+def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = False) -> list[str]:
+    """Compiler flags for this GPU alone: hipcc's target on ROCm; on NVIDIA nvcc's (``arch_specific``: its ``a``
+    target), a GPU under ``need`` refused by name."""
+
+    import torch
+
+    if hip():
+        return [f"--offload-arch={hip_arch()}"]
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < need:
         why = "thread-block clusters" if need >= CLUSTERS else "FP8 MMA"
@@ -54,14 +90,14 @@ def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABI
          **kwargs: Any) -> Any:
     """torch's JIT ``load`` for this GPU only (NVIDIA's containers list every architecture back to sm_80), with a line when it compiles or waits on a lock."""
 
-    from .rocm import HIP, hip_flags, use_pip_sdk
+    from .rocm import hip_flags, use_pip_sdk
 
-    if HIP:
+    if hip():
         use_pip_sdk()
     from torch.utils import cpp_extension
 
     flags = kwargs.get("extra_cuda_cflags", [])
-    kwargs["extra_cuda_cflags"] = [*(hip_flags(flags) if HIP else flags), *arch_flags(need, arch_specific)]
+    kwargs["extra_cuda_cflags"] = [*(hip_flags(flags) if hip() else flags), *arch_flags(need, arch_specific)]
     links = _toolkit()
     if links:
         kwargs["extra_ldflags"] = [*kwargs.get("extra_ldflags", []), *links]
@@ -189,4 +225,4 @@ def _say(text: str) -> None:
     print(f"[tensorfold] {text}", flush=True)
 
 
-__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "load", "pip_toolkit"]
+__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "gfx12", "hip", "hip_arch", "load", "pip_toolkit"]
