@@ -376,6 +376,27 @@ def test_packed_fp8_caches_cost_272_of_bf16s_512_bytes_and_admit_a_longer_window
     assert 0 < windows[0] < windows[1]
 
 
+@pytest.mark.parametrize("kv8, row", [(False, 512), (True, 272)])
+def test_one_window_buffer_charges_one_cache_and_admits_a_longer_window(kv8, row):
+    """The 27B on one stream over the RAM tier (``one_kv``): the cache term is one window-sized buffer, keys and values
+    of every attention layer at each slot (bf16 or packed FP8 rows), not four power-of-two copies; the same budget
+    then fits a longer window."""
+
+    from tensorfold.cuda.capacity import Weights, choose, make_plan
+    from tensorfold.cuda.geometry import gdn_geometry, layer_counts
+
+    def make(kv_heads, one_kv):
+        text = dict(small_config(), head_dim=256, num_key_value_heads=kv_heads)
+        return gdn_geometry(text, 1, 12, kv8=kv8, one_kv=one_kv)
+
+    attention = layer_counts(dict(small_config(), head_dim=256))[1]
+    for slots in (2048, 30000, 65536):
+        assert make(2, True).bytes_at(slots) - make(1, True).bytes_at(slots) == attention * slots * 2 * row
+    budget = make(2, False).needed(12000) + 32768
+    windows = [choose(make_plan(262144, None, False, budget, Weights(0, 0), make(2, one))) for one in (False, True)]
+    assert 0 < windows[0] < windows[1]
+
+
 def test_fp8_block_scales_are_sized(tmp_path):
     """The FP4 checkpoints store their block scales as ``F8_E4M3`` (the published Swift revision carries
     73,728 of them: the one dtype the startup estimate could not size), one byte a value like every fp8."""
