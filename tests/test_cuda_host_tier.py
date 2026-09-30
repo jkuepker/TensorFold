@@ -361,6 +361,22 @@ def test_a_restore_into_given_buffers_fills_their_rows_below_pos_and_hands_them_
 
 
 @pytest.mark.torch
+def test_a_restore_into_new_buffers_of_a_given_size_fills_their_rows_below_pos():
+    """``rows``: the concurrent decoder's stream-sized buffers, rows below ``pos`` restored, no fewer than ``pos``."""
+
+    import torch
+
+    tier = _tier(1 << 20, 1000)
+    ids = list(range(3, 43))
+    want, _, _ = _spill(torch, tier, ids[:25])
+    with pytest.raises(ValueError, match="25 rows or more, not 24"):
+        tier.take(ids[:26], rows=24)
+    got, back, _ = tier.take(ids[:26], rows=70)
+    assert got == ids[:25] and _exact(back, want, rows=False)
+    assert all(kv is None or all(t.shape[0] == 70 for t in kv) for kv in back.kv)
+
+
+@pytest.mark.torch
 def test_idle_segments_make_room_before_entries_least_recently_used_first():
     """Each entry takes four chunks of DeltaNet state and four of rows. Taken entries leave idle segments; a spill
     needing room frees the least recently used of them first, then the oldest entry, whose segment goes next unless
@@ -611,6 +627,11 @@ def test_the_concurrent_decoder_admits_a_returning_conversation_from_the_tier(cu
     for prompt, cached in ((a1, 0), (b1, 0), (a2, len(a1) - 1)):
         s = m.multi.Stream(list(prompt), 3, None)
         dec.admit(s)
+        if cached:                  # restored into the stream's own buffers; the cache views their rows, no copy
+            (k, v), (ck, cv) = s.st.kv[0], dec.cache.entries[-1][1].kv[0]
+            assert k.shape[0] == v.shape[0] == min(CONTEXT, len(prompt) + s.count)
+            assert ck.shape[0] == cv.shape[0] == cached
+            assert ck.data_ptr() == k.data_ptr() and cv.data_ptr() == v.data_ptr()
         dec._fill()
         assert s.cached == rec.prefills[-1].start == cached
         dec.finish([s])

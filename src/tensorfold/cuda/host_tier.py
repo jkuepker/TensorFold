@@ -260,11 +260,13 @@ class HostTier:
         self.entries.append(entry)
         return True
 
-    def take(self, prompt: Sequence[int], than: int = 0, into: list | None = None) -> tuple[list[int], Any, Any] | None:
+    def take(self, prompt: Sequence[int], than: int = 0, into: list | None = None,
+             rows: int | None = None) -> tuple[list[int], Any, Any] | None:
         """``longest``'s entry as (ids, state, snapshot) on the device; it leaves the tier, its segments stay cached.
         Attention rows below ``pos`` go into ``into`` (aligned with ``kv``: None, or contiguous (K, V) buffers of at
         least ``pos`` rows, which the state then holds, rows past ``pos`` untouched; ``fence`` first if a spill in
-        flight reads them), else into buffers of the old row count; every other tensor into tensors of its own."""
+        flight reads them), else into new buffers of ``rows`` rows (at least ``pos``; default the old row count);
+        every other tensor into tensors of its own."""
 
         entry = self.longest(prompt, than)
         if entry is None:
@@ -272,7 +274,10 @@ class HostTier:
         cls, attrs = entry.state
         pos = attrs["pos"]
         if into is None:
-            kv = [None if meta is None else meta[0](torch.empty((n, *shape), dtype=dtype, device=self.device)
+            if rows is not None and rows < pos:
+                raise ValueError(f"a restore of {pos} attention rows needs buffers of {pos} rows or more, not {rows}")
+            kv = [None if meta is None else meta[0](torch.empty((n if rows is None else rows, *shape), dtype=dtype,
+                                                                device=self.device)
                                                     for n, (dtype, shape) in zip(meta[1], pair))
                   for meta, pair in zip(entry.kv, entry.layout)]
         elif not _fits(into, entry.layout, pos):

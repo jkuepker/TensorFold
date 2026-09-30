@@ -124,11 +124,13 @@ class MultiDecoder:
             raise ValueError("image inputs require starting this engine with --vision")
         encoded = self.vision.encode(prepared, s.prompt) if prepared is not None else None
         hit = self.cache.longest(s.prompt) if s.draft and encoded is None else None
-        back = (self.tier.take(s.prompt, len(hit[0]) if hit else 0)
+        back = (self.tier.take(s.prompt, len(hit[0]) if hit else 0, rows=self._rows(s))
                 if self.tier is not None and s.draft and encoded is None else None)
-        if back is not None:                         # a longer match in host RAM: back in the cache, then resumed
-            self.cache.add(*back)
-            hit = self.cache.longest(s.prompt)
+        if back is not None:        # a longer match in host RAM, in buffers of the stream's size: the stream resumes
+            ids, st, snap = back    # in them and the cache views their rows below pos, as _step keeps a prompt end
+            self.cache.add(ids, viewed(clone_state(st)), own(snap))
+            self.cache.longest(s.prompt)                 # resumed from, as a GPU hit is
+            hit = (ids, st, snap)
         s.sid, s.cached = self.next_id, len(hit[0]) if hit else 0
         self.next_id += 1
         # the request's grammar rides after the fields (rank 1 compiles the same): a plain ADMIT is unchanged
@@ -143,10 +145,15 @@ class MultiDecoder:
         s.vision = encoded
         self._queue(s, hit)
 
+    def _rows(self, s: Stream) -> int:
+        """The most rows a stream's attention caches ever hold: its prompt and reply, within the context."""
+
+        need = len(s.prompt) + s.count
+        return min(self.context, need) if self.context else need
+
     def _queue(self, s: Stream, hit) -> None:
         drafter = self.draft if s.draft and self.drafts else None
-        need = len(s.prompt) + s.count                       # the most a stream's attention caches ever hold
-        state = private(hit[1] if hit else State(self.w), min(self.context, need) if self.context else need)
+        state = private(hit[1] if hit else State(self.w), self._rows(s))
         s.st = state
         s.snap = None if drafter is None else own(hit[2]) if hit and hit[2] is not None else \
             ([None] * drafter.layers, [None] * drafter.layers, 0, 0)
