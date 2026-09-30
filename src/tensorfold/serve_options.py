@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import math
 from typing import Any
 
 
@@ -30,7 +31,7 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if kv not in supported:
         raise ValueError(f"{family.title} on CUDA serves a {' or '.join(supported)} KV cache, not --kv-dtype {kv}")
     tier = getattr(args, "ram_tier_gib", 0.0) or 0.0
-    if tier < 0:
+    if not math.isfinite(tier) or tier < 0:
         raise ValueError(f"--ram-tier-gib is a GiB count (0: off), not {tier}")
     if tier and backend != "cuda":
         raise ValueError("--ram-tier-gib keeps evicted prompt states in host RAM beside a CUDA GPU; on MLX, "

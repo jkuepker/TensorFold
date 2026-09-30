@@ -631,6 +631,8 @@ def test_serve_parses_the_ram_tier():
     (["--ram-tier-gib", "8"], "cuda", "glm5_next", "has no host RAM tier"),
     (["--ram-tier-gib", "8", "--tp", "2"], "cuda", "qwen3_5", "drop it with --tp 2"),
     (["--ram-tier-gib", "-1"], "cuda", "qwen3_5", "is a GiB count"),
+    (["--ram-tier-gib", "nan"], "cuda", "qwen3_5", "is a GiB count"),
+    (["--ram-tier-gib", "inf"], "cuda", "qwen3_5", "is a GiB count"),
 ])
 def test_the_ram_tier_is_refused_before_any_download(tmp_path, monkeypatch, flags, backend, family, message):
     import importlib
