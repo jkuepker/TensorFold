@@ -161,6 +161,19 @@ def unified(torch) -> bool:
         return False
 
 
+def refuse_ram_tier(nbytes: int, torch=None) -> None:
+    """Refuse a host-RAM tier (``--ram-tier-gib``) on a GPU that shares the host's memory (asked of ``torch`` when
+    given), or larger than the host can spare."""
+
+    if torch is not None and unified(torch):
+        raise ValueError("--ram-tier-gib: this GPU shares the host's memory, where its prefix cache already lives; "
+                         "drop it")
+    room = host_room()
+    if room is not None and nbytes > room:
+        raise ValueError(f"--ram-tier-gib {nbytes / GIB:.1f}: this host has {room / GIB:.1f} GiB to spare (available "
+                         "memory less a tenth of it or 4 GiB); ask for less")
+
+
 def available_bytes(torch) -> int:
     free, total = map(int, torch.cuda.mem_get_info())
     available = max(0, free - max(4 * GIB, math.ceil(total / 10)))

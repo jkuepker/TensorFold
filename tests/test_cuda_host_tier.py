@@ -652,10 +652,36 @@ def test_the_ram_tier_is_refused_before_any_download(tmp_path, monkeypatch, flag
         cli.cmd_serve(cli.build_parser().parse_args(command))
 
 
-@pytest.mark.parametrize("flags", [[], ["--ram-tier-gib", "0"], ["--ram-tier-gib", "24"]])
-def test_qwen27_on_cuda_takes_the_ram_tier(tmp_path, flags):
+@pytest.mark.parametrize("room, shared, message", [
+    (8 * 1024**3, False, "this host has 8.0 GiB to spare"),
+    (None, True, "shares the host's memory"),
+])
+def test_a_ram_tier_the_host_cannot_hold_is_refused_before_any_download(tmp_path, monkeypatch, room, shared,
+                                                                          message):
+    from tensorfold import families, hub
+    from tensorfold.cuda import capacity
     from tensorfold.families import qwen3_5
 
+    monkeypatch.setattr(capacity, "host_room", lambda: room)
+    monkeypatch.setattr(capacity, "unified", lambda torch: shared)
+    found = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    monkeypatch.setattr(families, "detect", lambda path: found)
+    monkeypatch.setattr(cli, "_backend", lambda choice, fam: "cuda")
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("weights were fetched before the refusal"))
+    monkeypatch.setattr(families, "require_readable",
+                        lambda *a: pytest.fail("the checkpoint was read before the refusal"))
+    command = ["serve", str(tmp_path), "--no-update-check", "--ram-tier-gib", "24"]
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_serve(cli.build_parser().parse_args(command))
+
+
+@pytest.mark.parametrize("flags", [[], ["--ram-tier-gib", "0"], ["--ram-tier-gib", "24"]])
+def test_qwen27_on_cuda_takes_the_ram_tier(tmp_path, monkeypatch, flags):
+    from tensorfold.cuda import capacity
+    from tensorfold.families import qwen3_5
+
+    monkeypatch.setattr(capacity, "host_room", lambda: 32 * 1024**3)       # this host's RAM and GPU aside
+    monkeypatch.setattr(capacity, "unified", lambda torch: False)
     args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
     family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
     assert cli._check_serve_options(args, family, "cuda") is None

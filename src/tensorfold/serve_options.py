@@ -41,6 +41,14 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
         raise ValueError(f"--ram-tier-gib: {family.title} on CUDA has no host RAM tier for its prompt states")
     if tier and getattr(args, "tp", 1) != 1:
         raise ValueError("--ram-tier-gib keeps prompt states in one host's RAM for one GPU: drop it with --tp 2")
+    if tier:                                        # the host's memory and the GPU's kind, before any download
+        from tensorfold.cuda.capacity import GIB, refuse_ram_tier
+
+        try:
+            import torch
+        except ImportError:                         # the CUDA engine names a missing torch itself
+            torch = None
+        refuse_ram_tier(int(tier * GIB), torch)
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return

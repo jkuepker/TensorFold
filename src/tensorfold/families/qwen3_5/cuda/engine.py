@@ -66,20 +66,15 @@ class Qwen27Engine:
             if dim != 256:
                 raise ValueError(f"--kv-dtype fp8 packs rows of 256 values for the WMMA kernels, not head size {dim}")
         from .weights import load
-        from tensorfold.cuda.capacity import GIB, admit, gather_ints, host_room, unified
+        from tensorfold.cuda.capacity import GIB, admit, gather_ints, refuse_ram_tier
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
         from .affine_memory import draft_bytes, weight_transform
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
 
         if ram_tier and tp != 1:
             raise ValueError("--ram-tier-gib keeps prompt states in one host's RAM for one GPU: drop it with --tp 2")
-        if ram_tier and unified(torch):
-            raise ValueError("--ram-tier-gib: this GPU shares the host's memory, where its prefix cache already "
-                             "lives; drop it")
-        room = host_room() if ram_tier else None
-        if room is not None and ram_tier > room:
-            raise ValueError(f"--ram-tier-gib {ram_tier / GIB:.1f}: this host has {room / GIB:.1f} GiB to spare "
-                             "(available memory less a tenth of it or 4 GiB); ask for less")
+        if ram_tier:                        # the serve command asked before downloading; a direct caller asks here
+            refuse_ram_tier(ram_tier, torch)
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
