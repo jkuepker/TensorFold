@@ -3,7 +3,8 @@
 - ``HostTier``: a spilled state and drafter snapshot come back bit for bit, in tensors of their own (attention buffers
   at their old row count, the rows below ``pos`` copied) or in given buffers; the budget holds whole chunks and the
   least recently spilled entries leave first; a lookup takes the longest entry the prompt strictly extends, as
-  ``PrefixCache`` does; a host that refuses to pin gets one warning and pageable chunks.
+  ``PrefixCache`` does; a host that refuses to pin gets one warning and pageable chunks; a state too big for the
+  whole budget is named once and counted, and ``rows_for`` is the longest one ``put`` keeps.
 - Attention rows are shared by prefix: a spill copies only rows no cached segment holds for its ids (none for a
   prefix, the new ones for an extension, all past the first differing id), chains of segments come back exact, idle
   segments make room before entries do, and a long random run stays in budget with every take exact.
@@ -713,6 +714,60 @@ def test_reserve_carves_the_budget_into_free_chunks_up_front():
         torch.empty = real_empty
     assert sizes == [128, 128, 64, 32] and tier.held == tier.capacity == 11 and len(tier.free) == 11
     assert all(c.numel() == 32 for c in tier.free) and tier.used == 0
+
+
+def _rows_state(torch, pos: int, rows: int) -> FakeState:
+    """``_small``'s 300 DeltaNet bytes, and one attention layer's K and V of 16 bytes a row, ``pos`` of them held."""
+
+    st = _small(torch, list(range(pos)))
+    st.kv = [tuple(torch.zeros((rows, 1, 8), dtype=torch.bfloat16) for _ in range(2))]
+    return st
+
+
+@pytest.mark.torch
+def test_rows_for_is_the_longest_state_put_keeps():
+    import torch
+
+    tier = _tier(20 * 256, 256)
+    rows = tier.rows_for([300], [16, 16])
+    assert rows > 0
+    assert _tier(20 * 256, 256).put(list(range(rows)), _rows_state(torch, rows, rows + 1), None)
+    assert not _tier(20 * 256, 256).put(list(range(rows + 1)), _rows_state(torch, rows + 1, rows + 1), None)
+    assert _tier(256, 256).rows_for([300], [16, 16]) == -1        # its own tensors alone take two chunks
+
+
+@pytest.mark.torch
+def test_a_state_too_big_for_the_whole_tier_is_named_once_and_counted(capsys):
+    import torch
+
+    tier = _tier(4 * 256, 256)
+    for _ in range(2):
+        assert not tier.put(list(range(100)), _rows_state(torch, 100, 100), None)
+    out = capsys.readouterr().out
+    assert out.count("[tensorfold] RAM tier") == 1 and "100-token prompt state needs" in out
+    assert "raise --ram-tier-gib" in out and tier.stats()["dropped"] == 2 and not tier.entries
+
+
+@pytest.mark.torch
+def test_the_engine_sizes_a_state_as_put_counts_it(cuda_modules):  # noqa: F811
+    """``_state_bytes``: DeltaNet state and the drafter's longest context outside the attention rows, and each
+    attention buffer's bytes a row, bf16 or packed FP8 alike."""
+
+    from tensorfold.cuda.kernels import kv8
+    from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
+
+    config = SimpleNamespace(conv_kernel=4, k_heads=2, dk=8, v_heads=4, dv=8, head_dim=256, kv_heads=2)
+    layers = [SimpleNamespace(linear=x) for x in (True, True, True, False)]
+    for fp8, row in ((False, 256 * 2), (True, kv8.ROW8)):
+        engine = object.__new__(Qwen27Engine)
+        engine.w = SimpleNamespace(config=config, layers=layers, norm=SimpleNamespace(device="cpu"), kv_fp8=fp8)
+        engine.draft = SimpleNamespace(kv_local=2, window=100, head_dim=64, fast=True, layers=5)
+        sizes, widths = engine._state_bytes()
+        conv, rec = 3 * (2 * 2 * 8 + 4 * 8) * 2, 4 * 8 * 8 * 4
+        assert sorted(sizes) == sorted([conv] * 3 + [rec] * 3 + [2 * 100 * 64 * 2] * 10)
+        assert widths == [2 * row] * 2
+    engine.draft = None
+    assert sorted(engine._state_bytes()[0]) == sorted([conv] * 3 + [rec] * 3)
 
 
 @pytest.mark.torch

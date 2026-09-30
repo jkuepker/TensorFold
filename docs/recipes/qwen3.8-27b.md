@@ -76,9 +76,10 @@ there and copies only its new ones, and a shorter state (a message start, the pr
 state also holds about 190 MiB of DeltaNet and drafter state of its own. The budget is pinned at startup in 1 GiB
 slabs (24 GiB took about 7 s on the R9700's host) until the host refuses more (a locked-memory limit, `ulimit -l`,
 can cap it); then the last slab goes back, so the decode path's own pinned buffers still fit, and the rest is pageable,
-with one warning. Startup refuses a budget above the host's available memory less a
-tenth. One rank only; refused on GPUs that share the host's memory (DGX Spark). With `--parallel` the tier keeps
-evicted states but the window stays as without it.
+with one warning. A state bigger than the whole budget is not kept (one warning, then counted), and when the budget
+cannot hold a window-long state the startup line says how long a state it holds. Startup refuses a budget above the
+host's available memory less a tenth. One rank only; refused on GPUs that share the host's memory (DGX Spark). With
+`--parallel` the tier keeps evicted states but the window stays as without it.
 
 Measured on the R9700 (PCIe copies at 12.9 GiB/s each way) with `tools/bench_conversations.py`: 8 conversations of
 24,000 tokens served round-robin, 4 turns each, 32-token greedy replies, repeat-turn TTFT median:

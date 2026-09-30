@@ -191,6 +191,11 @@ class Qwen27Engine:
                   f"of host memory ({pinned / GIB:.1f} GiB pinned in {time.perf_counter() - t0:.1f}s) and come back "
                   "over PCIe instead of prefilling again"
                   + (", one conversation's keys and values on the GPU at a time" if self.window else ""), flush=True)
+            fits = self.tier.rows_for(*self._state_bytes())
+            if fits < self.context_window:
+                print(f"[tensorfold] RAM tier: it holds prompt states of at most {max(0, fits):,} tokens, short of "
+                      f"the {self.context_window:,}-token window; longer ones are prefilled again when their "
+                      "conversation returns (raise --ram-tier-gib to keep them)", flush=True)
         self.multi = self.scheduler = None
         if self.concurrent:
             from tensorfold.cuda.scheduler import Scheduler
@@ -243,6 +248,22 @@ class Qwen27Engine:
         st = State(self.w)
         st.kv, st.limit = list(self.window), next(kv[0].shape[0] for kv in self.window if kv is not None)
         return st
+
+    def _state_bytes(self) -> tuple[list[int], list[int]]:
+        """One prompt state in the RAM tier: the bytes of its tensors besides attention rows (DeltaNet state, and the
+        drafter's context at its longest), and each attention buffer's bytes a row."""
+
+        import math
+
+        from .forward import State
+
+        probe = State(self.w)
+        sizes = [t.numel() * t.element_size() for t in (*probe.conv, *probe.rec) if t is not None]
+        widths = [math.prod(t.shape[1:]) * t.element_size() for pair in probe.kv if pair is not None for t in pair]
+        d = self.draft
+        if d is not None:                   # keys and values of up to ``window`` rows a layer: bf16 fast, else fp32
+            sizes += [d.kv_local * d.window * d.head_dim * (2 if d.fast else 4)] * (2 * d.layers)
+        return sizes, widths
 
     def _drop_extensions(self, ids: list[int]) -> None:
         """Drop cached extensions before resuming a shorter prefix because cloned states share KV buffers and resumed writes overwrite longer prefixes."""

@@ -162,6 +162,7 @@ class HostTier:
         self.held = 0                                           # chunks allocated, in use or free
         self.clock = 0                                          # puts and takes so far: segments' last use
         self.to_host = self.from_host = 0                       # bytes copied each way so far
+        self.dropped = 0                                        # entries too big for the whole budget, not kept
         self.side = None                                        # the copy stream
         self.flying: list = []                                  # spills' events since the last ``fence``
         self.reading = None                                     # the last restore's event: its chunks are free after it
@@ -171,10 +172,25 @@ class HostTier:
         return (self.held - len(self.free)) * self.chunk
 
     def stats(self) -> dict:
-        """For server logs: entries, segments, bytes in use, and bytes copied to host and back so far."""
+        """For server logs: entries, segments, bytes in use, bytes copied to host and back, and entries dropped as too
+        big, so far."""
 
         return {"entries": len(self.entries), "segments": len(self.segments), "used": self.used,
-                "to_host": self.to_host, "from_host": self.from_host}
+                "to_host": self.to_host, "from_host": self.from_host, "dropped": self.dropped}
+
+    def rows_for(self, sizes: Sequence[int], widths: Sequence[int]) -> int:
+        """The most attention rows one entry fits in the whole budget beside tensors of ``sizes`` bytes, rounded as
+        ``put`` rounds them (each tensor aligned, then whole chunks); ``widths``: each attention buffer's bytes a row.
+        -1 when those tensors alone do not fit."""
+
+        own = -(-sum(_aligned(n) for n in sizes) // self.chunk)
+        if own > self.capacity:
+            return -1
+        lo, hi = 0, (self.capacity - own) * self.chunk // max(1, sum(widths)) + 1     # lo fits, hi does not
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            lo, hi = (mid, hi) if own + self._span(list(widths), mid) <= self.capacity else (lo, mid)
+        return lo
 
     def longest(self, prompt: Sequence[int], than: int = 0) -> Spilled | None:
         """The longest entry the prompt strictly extends (one prompt token is left to prefill), past ``than`` tokens."""
@@ -203,6 +219,12 @@ class HostTier:
         own = -(-size // self.chunk)
         self._remove([e for e in self.entries if e.ids == ids])
         if own + self._span(widths, pos) > self.capacity:
+            self.dropped += 1
+            if self.dropped == 1:
+                print(f"[tensorfold] RAM tier: a {pos:,}-token prompt state needs "
+                      f"{(own + self._span(widths, pos)) * self.chunk / GIB:.1f} GiB, more than the whole "
+                      f"{self.capacity * self.chunk / GIB:.1f} GiB tier; it is dropped and prefilled again when its "
+                      "conversation returns (raise --ram-tier-gib; later drops are counted, not printed)", flush=True)
             return False
         pieces = self._cover(ids, layout, pos)
         while self.capacity - self.held + len(self.free) < own + self._span(widths, pos - _reach(pieces)):
