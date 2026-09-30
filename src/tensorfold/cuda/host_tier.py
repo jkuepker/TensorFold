@@ -174,11 +174,12 @@ class HostTier:
         return (self.held - len(self.free)) * self.chunk
 
     def stats(self) -> dict:
-        """For server logs: entries, segments, bytes in use, bytes copied to host and back, and entries dropped as too
-        big, so far."""
+        """For ``/health``: entries, segments, bytes in use of the budget, bytes copied to host and back, and entries
+        dropped as too big, so far."""
 
         return {"entries": len(self.entries), "segments": len(self.segments), "used": self.used,
-                "to_host": self.to_host, "from_host": self.from_host, "dropped": self.dropped}
+                "budget": self.capacity * self.chunk, "to_host": self.to_host, "from_host": self.from_host,
+                "dropped": self.dropped}
 
     def rows_for(self, sizes: Sequence[int], widths: Sequence[int]) -> int:
         """The most attention rows one entry fits in the whole budget beside tensors of ``sizes`` bytes, rounded as
