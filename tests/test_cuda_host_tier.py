@@ -10,7 +10,9 @@
   segments make room before entries do, and a long random run stays in budget with every take exact.
 - ``PrefixCache.on_evict`` receives every entry the cache lets go: evicted past ``keep``, or dropped because a
   shorter entry resumes into buffers they share.
-- The one-stream engine and the concurrent decoder resume a returning conversation from the tier (stand-in prefills).
+- The one-stream engine and the concurrent decoder resume a returning conversation from the tier (stand-in prefills);
+  one stream over its window buffer, as the engine builds it with the tier, keeps every GPU state reading its own
+  ids through conversation switches, serial requests and resumes under a shared system prompt.
 - ``--ram-tier-gib`` reaches Qwen3.8-27B's CUDA engine on one rank and is refused elsewhere before any download.
 """
 
@@ -546,6 +548,59 @@ def _one_gpu(monkeypatch, *, tier: bool = True, points=None):
     return engine, starts
 
 
+def _window_gpu(monkeypatch, *, rows: int = 4096, points=None):
+    """``_one_gpu`` as ``Qwen27Engine`` builds it on one stream with the tier: one attention buffer every state uses.
+    The stand-in prefill writes its ids into the state's own buffers, as the real one does, so a prefill that runs over
+    rows a cached entry still needs shows up in ``_held``."""
+
+    import torch
+
+    engine, starts = _one_gpu(monkeypatch, points=points)
+    keys = torch.zeros((rows, 1, 1))
+    engine.window = [None, (keys, torch.zeros((rows, 1, 1)))]
+    forward = types.ModuleType(PKG + ".forward")
+
+    def fresh(w):
+        st = FakeState()
+        st.pos, st.limit, st.kv = 0, 0, [None, None]
+        st.conv, st.rec = [torch.zeros(3, 4).bfloat16(), None], [torch.zeros(2, 2), None]
+        return st
+
+    def at(st, n):
+        """A state over ``st``'s buffers after its first ``n`` ids, with a DeltaNet state of its own."""
+
+        other = FakeState()
+        other.pos, other.limit, other.kv = n, st.limit, list(st.kv)
+        other.conv, other.rec = [torch.full((3, 4), float(n)).bfloat16(), None], [torch.full((2, 2), float(n)), None]
+        return other
+
+    def prefill(w, prompt, sampling, drafter=None, *, state=None, limit=0, stops=(), keep=None, keep_at=None,
+                vision=None):
+        assert state is not None and state.kv[1][0] is keys, "one stream over the tier prefills in the window"
+        start = state.pos
+        assert _held(state) == list(prompt[:start]) and start < len(prompt)
+        starts.append(start)
+        ids = torch.tensor([float(t) for t in prompt[start:]])
+        state.kv[1][0][start:len(prompt), 0, 0] = ids
+        state.kv[1][1][start:len(prompt), 0, 0] = -ids
+        for p in stops:
+            if start < p < len(prompt) and keep is not None:
+                keep(p, at(state, p), None)
+        st = at(state, len(prompt))
+        return (st, 7) if keep_at is None else (st, 7, (at(state, keep_at), None))
+
+    sys.modules[PKG + ".decode"].prefill = prefill
+    forward.State = fresh
+    monkeypatch.setitem(sys.modules, PKG + ".forward", forward)
+    return engine, starts
+
+
+def _consistent(engine) -> bool:
+    """Every state the GPU cache holds reads its own ids from the window buffer."""
+
+    return all(_held(st) == ids and st.kv[1][0] is engine.window[1][0] for ids, st, _ in engine.cache.entries)
+
+
 def _run(engine, prompt):
     return engine.generate(list(prompt), 4, None, lambda tokens: False)
 
@@ -560,6 +615,58 @@ def _turn(head: list[int], seed: int) -> tuple[list[int], list[int]]:
     rng = random.Random(seed)
     first = head + [THINK, NL]
     return first, head + [THINK, NL2, END_THINK, NL2] + [rng.randrange(20, 90) for _ in range(7)] + [THINK, NL]
+
+
+@pytest.mark.torch
+def test_one_window_serves_conversations_round_robin_and_each_comes_back_from_the_tier(monkeypatch):
+    """One stream over the tier: each new conversation takes the window after the states on it go to host RAM, a
+    returning one resumes where it ended, and every state on the GPU reads its own ids from the window throughout."""
+
+    engine, starts = _window_gpu(monkeypatch)
+    rng = random.Random(11)
+    convs = [_turn([rng.randrange(20, 90) for _ in range(200)], seed=20 + i) for i in range(3)]
+    for first, _ in convs:
+        _run(engine, first)
+        assert starts[-1] == 0 and _consistent(engine) and _entries(engine.cache) == [first[:-1]]
+    for c, (first, second) in enumerate(convs):
+        stats = _run(engine, second)
+        assert starts[-1] == stats["cached"] == len(first) - 1
+        assert _consistent(engine) and _entries(engine.cache) == [first[:-1], second[:-1]]
+        others = [f[:-1] for f, _ in convs[c + 1:]] + [s[:-1] for _, s in convs[:c]]
+        assert sorted(e.ids for e in engine.tier.entries) == sorted(others + [f[:-1] for f, _ in convs[:c]])
+
+
+@pytest.mark.torch
+def test_a_serial_request_takes_the_window_and_the_conversation_comes_back(monkeypatch):
+    engine, starts = _window_gpu(monkeypatch)
+    rng = random.Random(12)
+    first, second = _turn([rng.randrange(20, 90) for _ in range(200)], seed=31)
+    _run(engine, first)
+    engine.generate([rng.randrange(20, 90) for _ in range(50)], 4, None, lambda tokens: False, draft=False)
+    assert starts[-1] == 0 and not engine.cache.entries and [e.ids for e in engine.tier.entries] == [first[:-1]]
+    stats = _run(engine, second)
+    assert starts[-1] == stats["cached"] == len(first) - 1 and _consistent(engine)
+
+
+@pytest.mark.torch
+def test_one_window_under_a_shared_system_prompt_spills_what_a_resume_overwrites(monkeypatch):
+    """The second conversation resumes from the system prompt on the GPU; the first's end, which its prefill would
+    overwrite, goes to host RAM first, and the first's next turn comes back from there into the window."""
+
+    system = list(range(1000, 1300))
+    points = lambda prompt: [len(system)] if len(prompt) > len(system) else []      # noqa: E731
+    rng = random.Random(3)
+    a1, a2 = _turn(system + [rng.randrange(20, 90) for _ in range(300)], seed=4)
+    b1, _ = _turn(system + [rng.randrange(20, 90) for _ in range(300)], seed=5)
+    engine, starts = _window_gpu(monkeypatch, points=points)
+    _run(engine, a1)
+    assert _entries(engine.cache) == [system, a1[:-1]] and _consistent(engine)
+    _run(engine, b1)
+    assert starts[-1] == len(system) and _entries(engine.cache) == [system, b1[:-1]] and _consistent(engine)
+    assert [e.ids for e in engine.tier.entries] == [a1[:-1]]
+    stats = _run(engine, a2)
+    assert starts[-1] == stats["cached"] == len(a1) - 1 and _consistent(engine)
+    assert _entries(engine.cache) == [a1[:-1], a2[:-1]]
 
 
 @pytest.mark.torch
