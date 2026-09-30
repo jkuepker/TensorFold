@@ -105,6 +105,18 @@ def accept(tokens: Sequence[int], parents: Sequence[int], sampled: Sequence[int]
     return path, terminal
 
 
+def extended(prompt: Sequence[int], entries, ids: Callable[[Any], list[int]] = lambda e: e[0], than: int = -1):
+    """The longest entry the prompt strictly extends (one prompt token is always left to prefill) past ``than`` tokens
+    (default: any), the first of equals, or None; ``ids``: an entry's ids."""
+
+    best, most = None, than
+    for entry in entries:
+        got = ids(entry)
+        if most < len(got) < len(prompt) and list(prompt[:len(got)]) == got:
+            best, most = entry, len(got)
+    return best
+
+
 class PrefixCache:
     """Private prompt-end states by ids (never decoded rows: prefill and decode bits differ), newest last."""
 
@@ -117,12 +129,7 @@ class PrefixCache:
     def longest(self, prompt: Sequence[int]):
         """The longest entry the prompt strictly extends (one prompt token is always left to prefill), now newest."""
 
-        best = None
-        for entry in self.entries:
-            ids = entry[0]
-            if len(ids) < len(prompt) and list(prompt[:len(ids)]) == ids and (best is None or len(ids) > len(best[0])):
-                best = entry
-        return self._touch(best)
+        return self._touch(extended(prompt, self.entries))
 
     def named(self, prompt: Sequence[int], length: int):
         """The entry holding the prompt's first ``length`` ids (a follower rank finds the leader's pick), now newest."""

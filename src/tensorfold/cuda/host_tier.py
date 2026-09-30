@@ -8,6 +8,8 @@ from typing import Any, Sequence
 
 import torch
 
+from tensorfold.cuda.streams import extended
+
 CHUNK = 16 << 20                 # host memory in chunks of this many bytes (a power of two: the pinned pool keeps it)
 ALIGN = 256                      # each tensor's bytes start on this boundary inside an entry or a segment
 GIB = 1024**3
@@ -193,14 +195,10 @@ class HostTier:
         return lo
 
     def longest(self, prompt: Sequence[int], than: int = 0) -> Spilled | None:
-        """The longest entry the prompt strictly extends (one prompt token is left to prefill), past ``than`` tokens."""
+        """The longest entry the prompt strictly extends (one prompt token is left to prefill), past ``than`` tokens:
+        ``PrefixCache.longest``'s rule."""
 
-        best = None
-        for entry in self.entries:
-            n = len(entry.ids)
-            if than < n < len(prompt) and (best is None or n > len(best.ids)) and list(prompt[:n]) == entry.ids:
-                best = entry
-        return best
+        return extended(prompt, self.entries, lambda e: e.ids, than)
 
     def put(self, ids: Sequence[int], state: Any, snap: Any) -> bool:
         """Copy an entry the GPU cache let go into host chunks: attention rows past what cached segments hold for its
