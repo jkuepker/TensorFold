@@ -259,13 +259,14 @@ class HostTier:
         self.entries.append(entry)
         return True
 
-    def take(self, prompt: Sequence[int], than: int = 0, into: list | None = None,
-             rows: int | None = None) -> tuple[list[int], Any, Any] | None:
+    def take(self, prompt: Sequence[int], than: int = 0, into: list | None = None, rows: int | None = None,
+             have: Sequence[int] = ()) -> tuple[list[int], Any, Any] | None:
         """``longest``'s entry as (ids, state, snapshot) on the device; it leaves the tier, its segments stay cached.
         Attention rows below ``pos`` go into ``into`` (aligned with ``kv``: None, or contiguous (K, V) buffers of at
         least ``pos`` rows, which the state then holds, rows past ``pos`` untouched; ``fence`` first if a spill in
         flight reads them), else into new buffers of ``rows`` rows (at least ``pos``; default the old row count);
-        every other tensor into tensors of its own."""
+        every other tensor into tensors of its own. ``have``: the ids whose prefill rows ``into`` already holds from
+        row 0; rows where they agree with the entry's ids are the entry's bits already, and are not copied."""
 
         entry = self.longest(prompt, than)
         if entry is None:
@@ -283,12 +284,15 @@ class HostTier:
             raise ValueError(f"the restore buffers must match the saved attention caches, {pos} rows or more each")
         else:
             kv = list(into)
+        skip = _common(have, entry.ids, pos) if into is not None else 0
         tensors = [torch.empty(shape, dtype=dtype, device=self.device) for dtype, shape, _ in entry.specs]
         jobs = [(_flat(t), entry.chunks, at) for t, (_, _, at) in zip(tensors, entry.specs)]
         buffers, widths = [t for pair in kv if pair is not None for t in pair], _widths(entry.layout)
         for seg, a, b in entry.pieces:
-            jobs += [(_flat(t[a:b]), seg.chunks, at + (a - seg.start) * width)
-                     for t, at, width in zip(buffers, seg.offsets, widths)]
+            a = max(a, skip)
+            if a < b:
+                jobs += [(_flat(t[a:b]), seg.chunks, at + (a - seg.start) * width)
+                         for t, at, width in zip(buffers, seg.offsets, widths)]
         current = torch.cuda.current_stream(self.device) if self.cuda else None
         if current is not None:
             for event in [entry.done] + [seg.done for seg, _, _ in entry.pieces]:

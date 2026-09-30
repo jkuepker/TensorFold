@@ -160,6 +160,13 @@ class PrefixCache:
         self._leave(sorted(self.entries, key=lambda e: -len(e[0])))
         self.hit = set()
 
+    def keep_path(self, ids: Sequence[int]) -> None:
+        """Drop the entries that are not prefixes of ``ids``, longest first: a restore of ``ids`` into buffers they
+        share rewrites their rows, and leaves its prefixes' rows as they were."""
+
+        ids = list(ids)
+        self._leave(sorted([e for e in self.entries if e[0] != ids[:len(e[0])]], key=lambda e: -len(e[0])))
+
     def drop(self, ids: Sequence[int]) -> None:
         """Drop the entries that extend ``ids``: a state resumed from ``ids`` writes rows into buffers they share."""
 

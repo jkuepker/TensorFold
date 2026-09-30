@@ -23,6 +23,7 @@ class Qwen27Engine:
 
     tier = None             # a HostTier: prompt states the GPU cache evicts, in host RAM (``--ram-tier-gib``)
     window = None           # with the tier on one stream: the one attention buffer every state uses, per layer
+    window_ids: Sequence[int] = ()      # the ids whose prefill rows the window holds from row 0
 
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
@@ -211,11 +212,16 @@ class Qwen27Engine:
     def _resume(self, prompt: list[int]):
         best = self.cache.longest(prompt)
         held = self.tier.longest(prompt, len(best[0]) if best else 0) if self.tier is not None else None
-        if self.window is not None and (held is not None or best is None):
+        if self.window is not None and held is not None:
+            self.cache.keep_path(held.ids)      # the restore rewrites the window: states off its path to RAM first
+            self.tier.fence()
+        elif self.window is not None and best is None:
             self._vacate()                      # another conversation takes the window buffer
-            best = None
-        back = self.tier.take(prompt, len(best[0]) if best else 0, into=self.window) if held is not None else None
+        back = (self.tier.take(prompt, len(best[0]) if best else 0, into=self.window, have=self.window_ids)
+                if held is not None else None)
         if back is not None:                    # a longer match in host RAM: back in the window buffer, or its own
+            if self.window is not None:         # rows the window held for the same ids were not copied again
+                self.window_ids = list(back[0])
             self.cache.add(*back)
             best = self.cache.longest(prompt)
         elif best is not None:
@@ -321,9 +327,13 @@ class Qwen27Engine:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
         stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
+        if self.window is not None:
+            self.window_ids = ()                # until the prefill below has written the prompt's rows
         st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else self._fresh(),
                                      limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded,
                                      **grammar)
+        if self.window is not None:             # an image prompt's rows depend on the image, not only its ids
+            self.window_ids = list(prompt) if vision is None else ()
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0

@@ -363,6 +363,33 @@ def test_a_restore_into_given_buffers_fills_their_rows_below_pos_and_hands_them_
 
 
 @pytest.mark.torch
+def test_a_restore_skips_the_rows_its_buffers_already_hold_for_the_same_ids():
+    """``have``: the ids whose rows the given buffers hold from row 0; rows below where they part from the entry's
+    ids are left as they are and not copied, every other row below ``pos`` comes back."""
+
+    import torch
+
+    tier = _tier(1 << 20, 1000)
+    ids = list(range(3, 43))
+    want, _, own = _spill(torch, tier, ids[:25])
+    gen = torch.Generator().manual_seed(5)
+    into = [None if kv is None else (_random(torch, gen, (32, 1, 8), torch.bfloat16),
+                                     _random(torch, gen, (32, 1, 8), torch.bfloat16)) for kv in want["kv"]]
+    before = [None if kv is None else tuple(t.clone() for t in kv) for kv in into]
+    have = ids[:10] + [99] + ids[11:30]                     # agrees with the entry's ids for 10 rows
+    copied = tier.from_host
+    got, back, _ = tier.take(ids[:26], into=into, have=have)
+    assert got == ids[:25]
+    for kv, old, saved in zip(back.kv, before, want["kv"]):
+        if kv is None:
+            continue
+        for t, u, s in zip(kv, old, saved):
+            assert _same(t[:10], u[:10]) and _same(t[10:25], s[10:25]) and _same(t[25:], u[25:])
+    row = sum(t[0].numel() * t.element_size() for kv in into if kv is not None for t in kv)
+    assert tier.from_host - copied == own + 15 * row                # rows 10 to 24 of every buffer, no others
+
+
+@pytest.mark.torch
 def test_a_restore_into_new_buffers_of_a_given_size_fills_their_rows_below_pos():
     """``rows``: the concurrent decoder's stream-sized buffers, rows below ``pos`` restored, no fewer than ``pos``."""
 
@@ -651,7 +678,8 @@ def test_a_serial_request_takes_the_window_and_the_conversation_comes_back(monke
 @pytest.mark.torch
 def test_one_window_under_a_shared_system_prompt_spills_what_a_resume_overwrites(monkeypatch):
     """The second conversation resumes from the system prompt on the GPU; the first's end, which its prefill would
-    overwrite, goes to host RAM first, and the first's next turn comes back from there into the window."""
+    overwrite, goes to host RAM first, and the first's next turn comes back from there into the window: the system
+    prompt's state stays on the GPU, and the rows the window already holds for the same ids are not copied again."""
 
     system = list(range(1000, 1300))
     points = lambda prompt: [len(system)] if len(prompt) > len(system) else []      # noqa: E731
@@ -664,9 +692,13 @@ def test_one_window_under_a_shared_system_prompt_spills_what_a_resume_overwrites
     _run(engine, b1)
     assert starts[-1] == len(system) and _entries(engine.cache) == [system, b1[:-1]] and _consistent(engine)
     assert [e.ids for e in engine.tier.entries] == [a1[:-1]]
+    shared = next(i for i, (x, y) in enumerate(zip(a1, b1)) if x != y)      # the window holds b1's rows
+    before = engine.tier.from_host
     stats = _run(engine, a2)
     assert starts[-1] == stats["cached"] == len(a1) - 1 and _consistent(engine)
-    assert _entries(engine.cache) == [a1[:-1], a2[:-1]]
+    assert _entries(engine.cache) == [system, a1[:-1], a2[:-1]] and [e.ids for e in engine.tier.entries] == [b1[:-1]]
+    own = 3 * 4 * 2 + 2 * 2 * 4                            # the stand-in DeltaNet state: conv bf16, rec fp32
+    assert engine.tier.from_host - before == own + (len(a1) - 1 - shared) * 2 * 4      # K and V rows past it
 
 
 @pytest.mark.torch

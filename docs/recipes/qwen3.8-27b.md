@@ -67,7 +67,9 @@ extends one further than any state on the GPU copies it back instead of prefilli
 restored state is the one that left, and replies are a fresh prefill's.
 
 On one stream the tier also changes where keys and values live: the GPU holds one window-sized attention buffer, used
-by the conversation being served; before another conversation takes it, the states on the GPU go to host RAM. The
+by the conversation being served; before another conversation takes it, the states on the GPU go to host RAM (a state
+the returning one extends, such as a shared system prompt's, stays, and rows the buffer already holds for the same
+ids are not copied back). The
 startup estimate then charges one buffer instead of two retained prefixes, the current state and a growth copy, so
 the window grows: on a 32 GB R9700, 126,553 tokens instead of 32,768 (221,382 with `--kv-dtype fp8`).
 
