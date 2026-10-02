@@ -216,13 +216,14 @@ def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
     return cw, (chunks < LONG_CHUNKS or cw < 4) if not pipe else pipe == "1"     # under 4 waves loading is slow
 
 
+@lru_cache(maxsize=None)                        # a process's choice, read once per shape
 def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> bool:
-    """ROCm's WMMA tree attention (``attention_rocm.cu``) where it applies, unless ``TF_ROCM_TREE_KERNEL=triton``;
-    the two give different bits, so a process uses one."""
+    """ROCm's WMMA tree attention (``attention_rocm.cu``) where it applies: on gfx12 unless ``TF_ROCM_TREE_KERNEL=triton``,
+    never on other AMD GPUs (its builtins are gfx12's); the two give different bits, so a process uses one."""
 
-    import os
+    from tensorfold.cuda.build import wmma
 
-    return os.environ.get("TF_ROCM_TREE_KERNEL", "wmma") != "triton" and _rocm().tree_supported(heads, kv_heads, dim)
+    return wmma("TF_ROCM_TREE_KERNEL") and _rocm().tree_supported(heads, kv_heads, dim)
 
 
 def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int) -> tuple[list[int], int, int]:

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from tensorfold.cuda import build
+from tests.test_qwen27_prompt_end_cache_host import cuda_modules  # noqa: F401  (fixture: CUDA modules, Triton stood in)
 
 NGC_LIST = "8.0 8.6 9.0 10.0 11.0 12.0+PTX"
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
@@ -22,6 +23,15 @@ def _gpu(monkeypatch, capability, name="GPU"):
     monkeypatch.setattr(build, "hip", lambda: False)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a: capability)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda *a: name)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_gfx12():
+    """``build.gfx12`` caches a process's GPU; each test patches its own, so read it afresh before and after."""
+
+    build.gfx12.cache_clear()
+    yield
+    build.gfx12.cache_clear()
 
 
 def _amd(monkeypatch, arch="gfx1201:sramecc-:xnack-"):
@@ -318,3 +328,67 @@ def test_a_build_only_rocm_host_names_its_target(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setenv("PYTORCH_ROCM_ARCH", "gfx1201;gfx942")
     assert build.arch_flags() == ["--offload-arch=gfx1201"]
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("arch, expected", [("gfx1201:sramecc-:xnack-", True), ("gfx1200", True), ("gfx1151", False),
+                                            ("gfx942:sramecc+:xnack-", False)])
+def test_gfx12_is_read_from_the_amd_gpus_architecture(monkeypatch, arch, expected):
+    _amd(monkeypatch, arch)
+    assert build.gfx12() is expected
+
+
+def test_nvidia_and_a_rocm_host_with_no_gpu_are_not_gfx12(monkeypatch):
+    monkeypatch.setattr(build, "hip", lambda: False)
+    assert build.gfx12() is False
+
+    def no_gpu():
+        raise RuntimeError("no HIP GPUs are available")
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", no_gpu)
+    assert build.gfx12() is False
+
+
+@pytest.mark.parametrize("arch, env, expected", [
+    ("gfx1201", None, True), ("gfx1201", "triton", False), ("gfx1201", "wmma", True), ("gfx1201", "dot2", True),
+    ("gfx1151", None, False), ("gfx1151", "triton", False),
+])
+def test_the_wmma_kernels_are_the_rocm_default_on_gfx12_only(monkeypatch, arch, env, expected):
+    """The WMMA builtins are gfx12's (they do not compile for gfx1151): other AMD GPUs default to Triton."""
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: arch)
+    if env is None:
+        monkeypatch.delenv("TF_ROCM_TREE_KERNEL", raising=False)
+    else:
+        monkeypatch.setenv("TF_ROCM_TREE_KERNEL", env)
+    assert build.wmma("TF_ROCM_TREE_KERNEL") is expected
+
+
+@pytest.mark.parametrize("env", ["wmma", "dot2"])
+def test_asking_for_the_wmma_kernels_off_gfx12_is_refused(monkeypatch, env):
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: "gfx1151")
+    monkeypatch.setenv("TF_ROCM_LANE", env)
+    with pytest.raises(ValueError, match=f"TF_ROCM_LANE={env}: the ROCm WMMA kernels build for gfx12 GPUs only"):
+        build.wmma("TF_ROCM_LANE")
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("arch, env, expected", [("gfx1201", None, "wmma"), ("gfx1201", "dot2", "dot2"),
+                                                 ("gfx1201", "triton", "triton"), ("gfx1151", None, "triton")])
+def test_the_rocm_lane_matmul_follows_the_gpu(cuda_modules, monkeypatch, arch, env, expected):  # noqa: F811
+    from tensorfold.cuda.kernels import qmm_groups
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: arch)
+    if env is None:
+        monkeypatch.delenv("TF_ROCM_LANE", raising=False)
+    else:
+        monkeypatch.setenv("TF_ROCM_LANE", env)
+    qmm_groups.lane_kernel.cache_clear()
+    try:
+        assert qmm_groups.lane_kernel() == expected
+    finally:
+        qmm_groups.lane_kernel.cache_clear()

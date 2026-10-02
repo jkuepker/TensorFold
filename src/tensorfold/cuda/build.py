@@ -54,6 +54,18 @@ def gfx12() -> bool:
         return False
 
 
+def wmma(env: str) -> bool:
+    """Whether the ROCm kernels ``env`` picks (``TF_ROCM_LANE``, ``TF_ROCM_ATTN_KERNEL``, ``TF_ROCM_TREE_KERNEL``) are
+    the WMMA ones: by default on gfx12 only, Triton elsewhere. ``triton`` turns them off; asking for them off gfx12 is
+    refused, since they would not build there."""
+
+    native = gfx12()
+    kind = os.environ.get(env) or ("wmma" if native else "triton")
+    if kind != "triton" and not native:
+        raise ValueError(f"{env}={kind}: the ROCm WMMA kernels build for gfx12 GPUs only; unset it, or use triton")
+    return kind != "triton"
+
+
 def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = False) -> list[str]:
     """Compiler flags for this GPU alone: hipcc's target on ROCm; on NVIDIA nvcc's (``arch_specific``: its ``a``
     target), a GPU under ``need`` refused by name."""
@@ -225,4 +237,4 @@ def _say(text: str) -> None:
     print(f"[tensorfold] {text}", flush=True)
 
 
-__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "gfx12", "hip", "hip_arch", "load", "pip_toolkit"]
+__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "gfx12", "hip", "hip_arch", "load", "pip_toolkit", "wmma"]

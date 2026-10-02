@@ -190,15 +190,17 @@ def _rocm():
 
 @lru_cache(maxsize=1)
 def lane_kernel() -> str:
-    """The ROCm lane matmul: ``qmm_rocm.cu``'s ``wmma`` (default: 20-28% under Triton at 12 rows on the 27B's large
-    projections, half its per-call cost on small ones), its ``dot2`` (bf16 dot instructions: fastest at one row,
-    compute bound at twelve) or ``triton``; ``TF_ROCM_LANE`` picks it. Their bits differ, so a process uses one for
-    every lane call."""
+    """The ROCm lane matmul: ``qmm_rocm.cu``'s ``wmma`` (the default on gfx12: 20-28% under Triton at 12 rows on the
+    27B's large projections, half its per-call cost on small ones), its ``dot2`` (bf16 dot instructions: fastest at one
+    row, compute bound at twelve), or ``triton`` (the default on other AMD GPUs, where ``qmm_rocm.cu`` does not build);
+    ``TF_ROCM_LANE`` picks it. Their bits differ, so a process uses one for every lane call."""
 
-    kind = os.environ.get("TF_ROCM_LANE", "wmma")
-    if kind not in ("triton", "dot2", "wmma"):
+    from tensorfold.cuda.build import wmma
+
+    kind = os.environ.get("TF_ROCM_LANE") or ""
+    if kind not in ("", "triton", "dot2", "wmma"):
         raise ValueError("TF_ROCM_LANE: triton, dot2 or wmma")
-    return kind
+    return (kind or "wmma") if wmma("TF_ROCM_LANE") else "triton"
 
 
 def gemv(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, n: int,

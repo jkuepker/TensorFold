@@ -177,10 +177,11 @@ def rocm_rows(w: int) -> tuple[int, bool]:
     return rb, os.environ.get("TF_ROCM_ATTN_PIPE", "1") != "0"
 
 
+@lru_cache(maxsize=None)                        # a process's choice, read once per shape
 def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> bool:
-    """ROCm's WMMA prompt attention (``attention_rocm.cu``) where it applies, unless ``TF_ROCM_ATTN_KERNEL=triton``;
-    the two give different bits, so a process uses one."""
+    """ROCm's WMMA prompt attention (``attention_rocm.cu``) where it applies: on gfx12 unless ``TF_ROCM_ATTN_KERNEL=triton``,
+    never on other AMD GPUs (its builtins are gfx12's); the two give different bits, so a process uses one."""
 
-    import os
+    from tensorfold.cuda.build import wmma
 
-    return os.environ.get("TF_ROCM_ATTN_KERNEL", "wmma") != "triton" and _rocm().supported(heads, kv_heads, dim)
+    return wmma("TF_ROCM_ATTN_KERNEL") and _rocm().supported(heads, kv_heads, dim)
