@@ -392,3 +392,23 @@ def test_the_rocm_lane_matmul_follows_the_gpu(cuda_modules, monkeypatch, arch, e
         assert qmm_groups.lane_kernel() == expected
     finally:
         qmm_groups.lane_kernel.cache_clear()
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("on_gfx12, layout", [(True, "groups"), (False, "mlx")])
+def test_rocm_weights_take_the_wmma_layout_on_gfx12_only(cuda_modules, monkeypatch, on_gfx12, layout):  # noqa: F811
+    """At load, gfx12 repacks the 4-bit weights into 16-output tiles for its WMMA kernels; other AMD GPUs keep the
+    stored layout, which their row-invariant decode kernel (``qgemv``) reads."""
+
+    import torch
+
+    from tensorfold.families.qwen3_5.cuda import qmm_fast
+    from tensorfold.families.qwen3_5.cuda.weights import QLinear
+
+    monkeypatch.setattr(qmm_fast, "hip", lambda: True)
+    monkeypatch.setattr(qmm_fast, "gfx12", lambda: on_gfx12)
+    n, k = 32, 128
+    q = QLinear(torch.randint(-(2**31), 2**31 - 1, (n, k // 8), dtype=torch.int64).to(torch.int32),
+                torch.ones((n, k // 64), dtype=torch.bfloat16), torch.zeros((n, k // 64), dtype=torch.bfloat16))
+    assert q.layout == "mlx" and q.fast
+    assert qmm_fast.tile(q).layout == layout

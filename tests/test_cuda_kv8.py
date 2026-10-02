@@ -187,6 +187,17 @@ def test_one_forward_reads_one_kind_of_cache(cuda):
 
 
 # ------------------------------------------------------------------------------------------------- the engine
+@pytest.fixture(autouse=True)
+def _fresh_gfx12():
+    """``build.gfx12`` caches a process's GPU; tests here patch their own, so read it afresh before and after."""
+
+    from tensorfold.cuda import build
+
+    build.gfx12.cache_clear()
+    yield
+    build.gfx12.cache_clear()
+
+
 @pytest.fixture
 def rocm(monkeypatch):
     from tensorfold.cuda import build
