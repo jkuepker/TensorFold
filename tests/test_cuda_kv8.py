@@ -192,6 +192,7 @@ def rocm(monkeypatch):
     from tensorfold.cuda import build
 
     monkeypatch.setattr(torch.version, "hip", "7.14")
+    monkeypatch.setattr(build, "gfx12", lambda: True)              # an R9700 (gfx1201)
     build.hip.cache_clear()
     yield
     build.hip.cache_clear()
@@ -227,21 +228,23 @@ def test_fp8_on_rocm_admits_a_longer_window_on_the_same_budget(tmp_path, monkeyp
     assert fp8["total_bytes_estimate"] <= budget
 
 
-@pytest.mark.parametrize("hip,head_dim,tp,env,message", [
-    (False, 256, 1, None, "NVIDIA serves bf16"),
-    (True, 256, 2, None, "drop --tp 2"),
-    (True, 64, 1, None, "not head size 64"),
-    (True, 256, 1, "TF_ROCM_ATTN_KERNEL", "TF_ROCM_ATTN_KERNEL=triton"),
-    (True, 256, 1, "TF_ROCM_TREE_KERNEL", "TF_ROCM_TREE_KERNEL=triton"),
+@pytest.mark.parametrize("hip,gfx12,head_dim,tp,env,message", [
+    (False, False, 256, 1, None, "NVIDIA serves bf16"),
+    (True, False, 256, 1, None, "WMMA attention of gfx12 GPUs"),          # gfx1151 and older AMD GPUs
+    (True, True, 256, 2, None, "drop --tp 2"),
+    (True, True, 64, 1, None, "not head size 64"),
+    (True, True, 256, 1, "TF_ROCM_ATTN_KERNEL", "TF_ROCM_ATTN_KERNEL=triton"),
+    (True, True, 256, 1, "TF_ROCM_TREE_KERNEL", "TF_ROCM_TREE_KERNEL=triton"),
 ])
-def test_fp8_is_refused_before_loading_where_no_kernel_reads_it(tmp_path, monkeypatch, fake_runtime, hip, head_dim,  # noqa: F811
-                                                               tp, env, message):
+def test_fp8_is_refused_before_loading_where_no_kernel_reads_it(tmp_path, monkeypatch, fake_runtime, hip, gfx12,  # noqa: F811
+                                                               head_dim, tp, env, message):
     from tensorfold.cuda import build
     from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
 
     calls, _ = fake_runtime
     checkpoint(tmp_path, dict(small_config(), head_dim=head_dim), HEAD)
     monkeypatch.setattr(torch.version, "hip", "7.14" if hip else None)
+    monkeypatch.setattr(build, "gfx12", lambda: gfx12)
     build.hip.cache_clear()
     if env:
         monkeypatch.setenv(env, "triton")
@@ -265,3 +268,44 @@ def test_the_family_passes_fp8_to_its_engine_and_refuses_other_caches(tmp_path, 
     with pytest.raises(ValueError, match="kv-dtype 'int8'"):
         qwen3_5.cuda_engine(tmp_path, no_drafts=True, kv_dtype="int8")
     assert len(made) == 2
+
+
+@pytest.mark.parametrize("flags, arch, message", [
+    (["--kv-dtype", "fp8"], "gfx1151", "--kv-dtype fp8: FP8 matrix instructions on AMD GPUs start with gfx12"),
+    (["--prefill-fp8"], "gfx1151", "--prefill-fp8: FP8 matrix instructions on AMD GPUs start with gfx12"),
+    (["--kv-dtype", "fp8"], "gfx1201", None),
+    (["--prefill-fp8"], "gfx1201", None),
+])
+def test_fp8_flags_on_amd_need_gfx12_before_any_download(tmp_path, monkeypatch, flags, arch, message):
+    """ROCm keeps prompts and keys and values in bf16 by default; the FP8 flags are refused, before any download, on an
+    AMD GPU below gfx12 (RDNA4), where no FP8 matrix instructions exist."""
+
+    from tensorfold import cli, families, hub
+    from tensorfold.cuda import build
+    from tensorfold.families import qwen3_5
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: arch)
+    found = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--no-update-check"] + flags)
+    if message is None:
+        assert cli._check_serve_options(args, found, "cuda") is None
+        return
+    monkeypatch.setattr(families, "detect", lambda path: found)
+    monkeypatch.setattr(cli, "_backend", lambda choice, fam: "cuda")
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("weights were fetched before the refusal"))
+    monkeypatch.setattr(families, "require_readable", lambda *a: pytest.fail("the checkpoint was read before the refusal"))
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_serve(args)
+
+
+@pytest.mark.parametrize("arch, fast", [("gfx1201", True), ("gfx1151", False)])
+def test_fp8_prompt_rows_on_rocm_need_gfx12(monkeypatch, arch, fast):
+    from tensorfold.cuda import build
+    from tensorfold.families.qwen3_5.cuda.weights import Weights
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: arch)
+    w = Weights.__new__(Weights)
+    w.quant, w.layers = "mlx", []
+    assert w.fast_prefill is fast

@@ -39,6 +39,8 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     supported = getattr(family.package, "CUDA_KV_DTYPES", ("bf16",))
     if kv not in supported:
         raise ValueError(f"{family.title} on CUDA serves a {' or '.join(supported)} KV cache, not --kv-dtype {kv}")
+    if kv == "fp8" and backend == "cuda":
+        _need_gfx12("--kv-dtype fp8")
     slots = getattr(args, "checkpoint_slots", None)
     if slots is not None and backend == "cuda" and getattr(family.package, "CUDA_CHECKPOINT_SLOTS", False):
         if slots < 1:
@@ -50,6 +52,8 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if getattr(args, "prefill_fp8", None) and not fp8:              # asked for by name, not a default
         raise ValueError(f"--prefill-fp8 picks FP8 prompt kernels on CUDA; {family.title} on "
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has none (its prompts run bf16 activations)")
+    if getattr(args, "prefill_fp8", None):
+        _need_gfx12("--prefill-fp8")
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return
@@ -59,6 +63,22 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has no such rule")
     if not 0.0 <= confidence <= 1.0:
         raise ValueError(f"--mtp-confidence is a probability from 0 to 1, not {confidence}")
+
+
+def _need_gfx12(flag: str) -> None:
+    """FP8 matrix work on an AMD GPU needs gfx12 (RDNA4): refuse ``flag`` on another before any download. NVIDIA and
+    hosts without ROCm's torch pass (their engines decide)."""
+
+    from tensorfold.cuda.build import gfx12, hip, hip_arch
+
+    if not hip() or gfx12():
+        return
+    try:
+        arch = hip_arch()
+    except (AssertionError, RuntimeError):
+        arch = "with no visible GPU"
+    raise ValueError(f"{flag}: FP8 matrix instructions on AMD GPUs start with gfx12 (RDNA4); this GPU is {arch}, "
+                     "so drop the flag (prompts and keys and values then run bf16)")
 
 
 def _cuda_streams(value: Any) -> int:

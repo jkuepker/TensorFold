@@ -67,6 +67,9 @@ class Qwen27Engine:
             if not hip():
                 raise ValueError("--kv-dtype fp8: FP8 keys and values run on ROCm's WMMA attention; NVIDIA serves "
                                  "bf16")
+            if not gfx12():
+                raise ValueError("--kv-dtype fp8: FP8 keys and values run on the WMMA attention of gfx12 GPUs (RDNA4); "
+                                 "this AMD GPU serves bf16")
             if tp != 1:
                 raise ValueError("--kv-dtype fp8 runs on one GPU: drop --tp 2")
             for name in ("TF_ROCM_ATTN_KERNEL", "TF_ROCM_TREE_KERNEL"):
