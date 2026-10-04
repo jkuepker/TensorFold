@@ -1,0 +1,167 @@
+	.amdgcn_target "amdgcn-amd-amdhsa-unknown-gfx1201"
+	.amdhsa_code_object_version 6
+	.text
+	.globl	intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9
+	.p2align	8
+	.type	intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9,@function
+intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9:
+.Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9$local:
+	.type	.Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9$local,@function
+	s_load_b128 s[4:7], s[0:1], 0x0
+	v_lshrrev_b32_e32 v1, 1, v0
+	v_and_b32_e32 v0, 15, v0
+	s_load_b64 s[0:1], s[0:1], 0x10
+	s_delay_alu instid0(VALU_DEP_2) | instskip(NEXT) | instid1(VALU_DEP_2)
+	v_and_b32_e32 v2, 0x1f8, v1
+	v_lshlrev_b32_e32 v5, 5, v0
+	v_lshlrev_b32_e32 v1, 4, v1
+	s_delay_alu instid0(VALU_DEP_3) | instskip(SKIP_1) | instid1(VALU_DEP_3)
+	v_lshl_or_b32 v3, v2, 4, v0
+	v_lshlrev_b32_e32 v2, 1, v2
+	v_or3_b32 v0, v1, v0, 0x70
+	s_delay_alu instid0(VALU_DEP_3)
+	v_lshlrev_b32_e32 v4, 1, v3
+	v_lshlrev_b32_e32 v18, 2, v3
+	s_wait_kmcnt 0x0
+	s_clause 0x3
+	global_load_d16_b16 v8, v4, s[6:7]
+	global_load_d16_b16 v9, v4, s[6:7] offset:64
+	global_load_d16_b16 v10, v4, s[6:7] offset:128
+	global_load_d16_b16 v11, v4, s[6:7] offset:192
+	v_add_co_u32 v5, s2, s4, v5
+	s_delay_alu instid0(VALU_DEP_1) | instskip(NEXT) | instid1(VALU_DEP_2)
+	v_add_co_ci_u32_e64 v6, null, s5, 0, s2
+	v_add_co_u32 v1, vcc_lo, v5, v2
+	s_delay_alu instid0(VALU_DEP_1)
+	v_add_co_ci_u32_e64 v2, null, 0, v6, vcc_lo
+	v_lshlrev_b32_e32 v5, 1, v0
+	global_load_b128 v[12:15], v[1:2], off
+	s_wait_loadcnt 0x4
+	global_load_d16_hi_b16 v8, v4, s[6:7] offset:32
+	s_wait_loadcnt 0x4
+	global_load_d16_hi_b16 v9, v4, s[6:7] offset:96
+	s_wait_loadcnt 0x4
+	global_load_d16_hi_b16 v10, v4, s[6:7] offset:160
+	s_wait_loadcnt 0x4
+	global_load_d16_hi_b16 v11, v5, s[6:7]
+	v_mov_b32_e32 v1, 0
+	s_delay_alu instid0(VALU_DEP_1) | instskip(SKIP_2) | instid1(VALU_DEP_2)
+	v_lshlrev_b64_e32 v[16:17], 2, v[0:1]
+	s_wait_loadcnt 0x0
+	v_wmma_f32_16x16x16_bf16 v[0:7], v[12:15], v[8:11], 0
+	v_add_co_u32 v8, vcc_lo, s0, v16
+	s_wait_alu depctr_va_vcc(0)
+	s_delay_alu instid0(VALU_DEP_3)
+	v_add_co_ci_u32_e64 v9, null, s1, v17, vcc_lo
+	s_clause 0x7
+	global_store_b32 v18, v0, s[0:1]
+	global_store_b32 v18, v1, s[0:1] offset:64
+	global_store_b32 v18, v2, s[0:1] offset:128
+	global_store_b32 v18, v3, s[0:1] offset:192
+	global_store_b32 v18, v4, s[0:1] offset:256
+	global_store_b32 v18, v5, s[0:1] offset:320
+	global_store_b32 v18, v6, s[0:1] offset:384
+	global_store_b32 v[8:9], v7, off
+	s_endpgm
+.Lfunc_end0:
+	.size	intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9, .Lfunc_end0-intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9
+	.size	.Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9$local, .Lfunc_end0-intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9
+	.section	.rodata,"a",@progbits
+	.p2align	6, 0x0
+	.amdhsa_kernel intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9
+		.amdhsa_group_segment_fixed_size 0
+		.amdhsa_private_segment_fixed_size 0
+		.amdhsa_kernarg_size 24
+		.amdhsa_user_sgpr_count 2
+		.amdhsa_user_sgpr_dispatch_ptr 0
+		.amdhsa_user_sgpr_queue_ptr 0
+		.amdhsa_user_sgpr_kernarg_segment_ptr 1
+		.amdhsa_user_sgpr_dispatch_id 0
+		.amdhsa_user_sgpr_private_segment_size 0
+		.amdhsa_wavefront_size32 1
+		.amdhsa_uses_dynamic_stack 0
+		.amdhsa_enable_private_segment 0
+		.amdhsa_system_sgpr_workgroup_id_x 1
+		.amdhsa_system_sgpr_workgroup_id_y 0
+		.amdhsa_system_sgpr_workgroup_id_z 0
+		.amdhsa_system_sgpr_workgroup_info 0
+		.amdhsa_system_vgpr_workitem_id 0
+		.amdhsa_next_free_vgpr 19
+		.amdhsa_next_free_sgpr 8
+		.amdhsa_reserve_vcc 1
+		.amdhsa_float_round_mode_32 0
+		.amdhsa_float_round_mode_16_64 0
+		.amdhsa_float_denorm_mode_32 3
+		.amdhsa_float_denorm_mode_16_64 3
+		.amdhsa_fp16_overflow 0
+		.amdhsa_workgroup_processor_mode 1
+		.amdhsa_memory_ordered 1
+		.amdhsa_forward_progress 1
+		.amdhsa_inst_pref_size ((instprefsize(.Lfunc_end0-intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9)<<4)&4080)>>4
+		.amdhsa_round_robin_scheduling 0
+		.amdhsa_exception_fp_ieee_invalid_op 0
+		.amdhsa_exception_fp_denorm_src 0
+		.amdhsa_exception_fp_ieee_div_zero 0
+		.amdhsa_exception_fp_ieee_overflow 0
+		.amdhsa_exception_fp_ieee_underflow 0
+		.amdhsa_exception_fp_ieee_inexact 0
+		.amdhsa_exception_int_div_zero 0
+	.end_amdhsa_kernel
+	.text
+
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.num_vgpr, 19
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.num_agpr, 0
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.numbered_sgpr, 8
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.num_named_barrier, 0
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.private_seg_size, 0
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.uses_vcc, 1
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.uses_flat_scratch, 0
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.has_dyn_sized_stack, 0
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.has_recursion, 0
+	.set .Lintr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.has_indirect_call, 0
+	.p2alignl 7, 3214868480
+	.fill 96, 4, 3214868480
+	.section	.AMDGPU.gpr_maximums,"",@progbits
+	.set amdgpu.max_num_vgpr, 0
+	.set amdgpu.max_num_agpr, 0
+	.set amdgpu.max_num_sgpr, 0
+	.set amdgpu.max_num_named_barrier, 0
+	.text
+	.section	".note.GNU-stack","",@progbits
+	.amdgpu_metadata
+---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  generic
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  generic
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  generic
+        .offset:         16
+        .size:           8
+        .value_kind:     global_buffer
+    .group_segment_fixed_size: 0
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 24
+    .max_flat_workgroup_size: 1024
+    .name:           intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9
+    .private_segment_fixed_size: 0
+    .sgpr_count:     10
+    .sgpr_spill_count: 0
+    .symbol:         intr_wmma_kernel_Pointer_True6A6AoA6A6AcB_54616a893a8b3fe9.kd
+    .uses_dynamic_stack: false
+    .vgpr_count:     19
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+amdhsa.target:   amdgcn-amd-amdhsa-unknown-gfx1201
+amdhsa.version:
+  - 1
+  - 2
+...
+
+	.end_amdgpu_metadata

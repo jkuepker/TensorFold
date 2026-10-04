@@ -1,0 +1,149 @@
+	.amdgcn_target "amdgcn-amd-amdhsa-unknown-gfx1201"
+	.amdhsa_code_object_version 6
+	.text
+	.globl	intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a
+	.p2align	8
+	.type	intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a,@function
+intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a:
+.Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a$local:
+	.type	.Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a$local,@function
+	s_load_b128 s[0:3], s[0:1], 0x0
+	v_lshlrev_b32_e32 v9, 5, v0
+	v_lshrrev_b32_e32 v10, 1, v0
+	s_wait_kmcnt 0x0
+	s_clause 0x1
+	global_load_b128 v[1:4], v9, s[0:1]
+	global_load_b128 v[5:8], v9, s[0:1] offset:16
+	v_mul_i32_i24_e32 v11, 0xffffffe0, v10
+	v_mul_u32_u24_e32 v10, 40, v10
+	s_delay_alu instid0(VALU_DEP_2) | instskip(NEXT) | instid1(VALU_DEP_1)
+	v_lshl_add_u32 v11, v0, 4, v11
+	v_add_lshl_u32 v10, v11, v10, 1
+	s_wait_loadcnt 0x1
+	ds_store_b128 v10, v[1:4]
+	s_wait_loadcnt 0x0
+	ds_store_b128 v10, v[5:8] offset:16
+	s_wait_dscnt 0x0
+	s_barrier_signal -1
+	v_lshlrev_b32_e32 v8, 1, v0
+	s_barrier_wait -1
+	global_inv scope:SCOPE_SE
+	ds_load_u16_d16 v0, v8
+	ds_load_u16_d16_hi v0, v8 offset:80
+	ds_load_u16_d16 v1, v8 offset:160
+	ds_load_u16_d16_hi v1, v8 offset:240
+	ds_load_u16_d16 v2, v8 offset:320
+	ds_load_u16_d16_hi v2, v8 offset:400
+	ds_load_u16_d16 v3, v8 offset:480
+	ds_load_u16_d16_hi v3, v8 offset:560
+	ds_load_u16_d16 v4, v8 offset:640
+	ds_load_u16_d16_hi v4, v8 offset:720
+	ds_load_u16_d16 v5, v8 offset:800
+	ds_load_u16_d16_hi v5, v8 offset:880
+	ds_load_u16_d16 v6, v8 offset:960
+	ds_load_u16_d16_hi v6, v8 offset:1040
+	ds_load_u16_d16 v7, v8 offset:1120
+	ds_load_u16_d16_hi v7, v8 offset:1200
+	s_wait_dscnt 0x8
+	global_store_b128 v9, v[0:3], s[2:3]
+	s_wait_dscnt 0x0
+	global_store_b128 v9, v[4:7], s[2:3] offset:16
+	s_endpgm
+.Lfunc_end0:
+	.size	intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a, .Lfunc_end0-intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a
+	.size	.Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a$local, .Lfunc_end0-intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a
+	.section	.rodata,"a",@progbits
+	.p2align	6, 0x0
+	.amdhsa_kernel intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a
+		.amdhsa_group_segment_fixed_size 1280
+		.amdhsa_private_segment_fixed_size 0
+		.amdhsa_kernarg_size 16
+		.amdhsa_user_sgpr_count 2
+		.amdhsa_user_sgpr_dispatch_ptr 0
+		.amdhsa_user_sgpr_queue_ptr 0
+		.amdhsa_user_sgpr_kernarg_segment_ptr 1
+		.amdhsa_user_sgpr_dispatch_id 0
+		.amdhsa_user_sgpr_private_segment_size 0
+		.amdhsa_wavefront_size32 1
+		.amdhsa_uses_dynamic_stack 0
+		.amdhsa_enable_private_segment 0
+		.amdhsa_system_sgpr_workgroup_id_x 1
+		.amdhsa_system_sgpr_workgroup_id_y 0
+		.amdhsa_system_sgpr_workgroup_id_z 0
+		.amdhsa_system_sgpr_workgroup_info 0
+		.amdhsa_system_vgpr_workitem_id 0
+		.amdhsa_next_free_vgpr 12
+		.amdhsa_next_free_sgpr 4
+		.amdhsa_reserve_vcc 0
+		.amdhsa_float_round_mode_32 0
+		.amdhsa_float_round_mode_16_64 0
+		.amdhsa_float_denorm_mode_32 3
+		.amdhsa_float_denorm_mode_16_64 3
+		.amdhsa_fp16_overflow 0
+		.amdhsa_workgroup_processor_mode 1
+		.amdhsa_memory_ordered 1
+		.amdhsa_forward_progress 1
+		.amdhsa_inst_pref_size ((instprefsize(.Lfunc_end0-intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a)<<4)&4080)>>4
+		.amdhsa_round_robin_scheduling 0
+		.amdhsa_exception_fp_ieee_invalid_op 0
+		.amdhsa_exception_fp_denorm_src 0
+		.amdhsa_exception_fp_ieee_div_zero 0
+		.amdhsa_exception_fp_ieee_overflow 0
+		.amdhsa_exception_fp_ieee_underflow 0
+		.amdhsa_exception_fp_ieee_inexact 0
+		.amdhsa_exception_int_div_zero 0
+	.end_amdhsa_kernel
+	.text
+
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.num_vgpr, 12
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.num_agpr, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.numbered_sgpr, 4
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.num_named_barrier, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.private_seg_size, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.uses_vcc, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.uses_flat_scratch, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.has_dyn_sized_stack, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.has_recursion, 0
+	.set .Lintr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.has_indirect_call, 0
+	.p2alignl 7, 3214868480
+	.fill 96, 4, 3214868480
+	.section	.AMDGPU.gpr_maximums,"",@progbits
+	.set amdgpu.max_num_vgpr, 0
+	.set amdgpu.max_num_agpr, 0
+	.set amdgpu.max_num_sgpr, 0
+	.set amdgpu.max_num_named_barrier, 0
+	.text
+	.section	".note.GNU-stack","",@progbits
+	.amdgpu_metadata
+---
+amdhsa.kernels:
+  - .args:
+      - .address_space:  generic
+        .offset:         0
+        .size:           8
+        .value_kind:     global_buffer
+      - .address_space:  generic
+        .offset:         8
+        .size:           8
+        .value_kind:     global_buffer
+    .group_segment_fixed_size: 1280
+    .kernarg_segment_align: 8
+    .kernarg_segment_size: 16
+    .max_flat_workgroup_size: 1024
+    .name:           intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a
+    .private_segment_fixed_size: 0
+    .sgpr_count:     4
+    .sgpr_spill_count: 0
+    .symbol:         intr_lds_kernel_Pointer_True6A6AoA6A6AcBsA_4e0b19d777c1222a.kd
+    .uses_dynamic_stack: false
+    .vgpr_count:     12
+    .vgpr_spill_count: 0
+    .wavefront_size: 32
+    .workgroup_processor_mode: 1
+amdhsa.target:   amdgcn-amd-amdhsa-unknown-gfx1201
+amdhsa.version:
+  - 1
+  - 2
+...
+
+	.end_amdgpu_metadata
