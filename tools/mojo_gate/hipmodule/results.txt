@@ -1,0 +1,13 @@
+[92mSuccessfully preprocessed all matching files.[0m
+device AMD Radeon AI PRO R9700 pci_bus_id 7 gfx1201 torch 2.11.0+rocm7.14
+scale_add exact vs torch: PASS (n=1..1M, partial blocks; hidden args filled by HIP)
+wmma 16x16x16 bf16 vs torch: max abs err 4.77e-07 PASS
+argprobe (extra-buffer form, hand-built kernarg) -> [11, 22, 33, 44] PASS
+non-default stream: PASS (consumed output of 5 matmuls + a scale on s; event span 11.14 ms covers matmul + launch)
+mojo hipModule   enqueue median   1.64 us  p99   2.61 us   back-to-back   2.73 us/call
+hipcc <<<>>>     enqueue median   1.65 us  p99   2.60 us   back-to-back   2.62 us/call
+torch.add        enqueue median   1.41 us  p99   2.23 us   back-to-back   2.85 us/call
+mojo hipModule   enqueue median   1.65 us  p99   2.58 us   back-to-back   2.68 us/call
+hipcc <<<>>>     enqueue median   1.65 us  p99   2.79 us   back-to-back   2.62 us/call
+torch.add        enqueue median   1.41 us  p99   2.22 us   back-to-back   2.85 us/call
+hipGraph capture of 10 chained launches + replay (and replay with new input data): PASS

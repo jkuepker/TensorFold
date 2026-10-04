@@ -1,0 +1,180 @@
+{
+ "arch": "gfx1201",
+ "source": "kernels.mojo",
+ "kernels": [
+  {
+   "name": "argprobe",
+   "symbol": "kernels_argprobe_Pointer_True6A6AoA6A6AcB_f458d65631176cda",
+   "hsaco": "argprobe.hsaco",
+   "kernarg_size": 40,
+   "kernarg_align": 8,
+   "explicit_args": [
+    {
+     "offset": 0,
+     "size": 8,
+     "kind": "global_buffer"
+    },
+    {
+     "offset": 8,
+     "size": 4,
+     "kind": "by_value"
+    },
+    {
+     "offset": 16,
+     "size": 8,
+     "kind": "by_value"
+    },
+    {
+     "offset": 24,
+     "size": 4,
+     "kind": "by_value"
+    },
+    {
+     "offset": 32,
+     "size": 8,
+     "kind": "by_value"
+    }
+   ],
+   "hidden_args": [],
+   "group_segment": 0,
+   "private_segment": 0,
+   "wavefront_size": 32,
+   "max_flat_workgroup_size": 1024,
+   "vgpr": 9,
+   "sgpr": 11
+  },
+  {
+   "name": "wmma_kernel",
+   "symbol": "kernels_wmma_kernel_Pointer_T6A6AoA6A6AcB_a10d285fca00ab20",
+   "hsaco": "wmma_kernel.hsaco",
+   "kernarg_size": 24,
+   "kernarg_align": 8,
+   "explicit_args": [
+    {
+     "offset": 0,
+     "size": 8,
+     "kind": "global_buffer"
+    },
+    {
+     "offset": 8,
+     "size": 8,
+     "kind": "global_buffer"
+    },
+    {
+     "offset": 16,
+     "size": 8,
+     "kind": "global_buffer"
+    }
+   ],
+   "hidden_args": [],
+   "group_segment": 0,
+   "private_segment": 0,
+   "wavefront_size": 32,
+   "max_flat_workgroup_size": 1024,
+   "vgpr": 19,
+   "sgpr": 10
+  },
+  {
+   "name": "scale_add",
+   "symbol": "kernels_scale_add_Pointer_Tru6A6AoA6A6AcB_1e394c5d7089de4f",
+   "hsaco": "scale_add.hsaco",
+   "kernarg_size": 288,
+   "kernarg_align": 8,
+   "explicit_args": [
+    {
+     "offset": 0,
+     "size": 8,
+     "kind": "global_buffer"
+    },
+    {
+     "offset": 8,
+     "size": 8,
+     "kind": "global_buffer"
+    },
+    {
+     "offset": 16,
+     "size": 8,
+     "kind": "global_buffer"
+    },
+    {
+     "offset": 24,
+     "size": 4,
+     "kind": "by_value"
+    }
+   ],
+   "hidden_args": [
+    {
+     "offset": 32,
+     "size": 4,
+     "kind": "hidden_block_count_x"
+    },
+    {
+     "offset": 36,
+     "size": 4,
+     "kind": "hidden_block_count_y"
+    },
+    {
+     "offset": 40,
+     "size": 4,
+     "kind": "hidden_block_count_z"
+    },
+    {
+     "offset": 44,
+     "size": 2,
+     "kind": "hidden_group_size_x"
+    },
+    {
+     "offset": 46,
+     "size": 2,
+     "kind": "hidden_group_size_y"
+    },
+    {
+     "offset": 48,
+     "size": 2,
+     "kind": "hidden_group_size_z"
+    },
+    {
+     "offset": 50,
+     "size": 2,
+     "kind": "hidden_remainder_x"
+    },
+    {
+     "offset": 52,
+     "size": 2,
+     "kind": "hidden_remainder_y"
+    },
+    {
+     "offset": 54,
+     "size": 2,
+     "kind": "hidden_remainder_z"
+    },
+    {
+     "offset": 72,
+     "size": 8,
+     "kind": "hidden_global_offset_x"
+    },
+    {
+     "offset": 80,
+     "size": 8,
+     "kind": "hidden_global_offset_y"
+    },
+    {
+     "offset": 88,
+     "size": 8,
+     "kind": "hidden_global_offset_z"
+    },
+    {
+     "offset": 96,
+     "size": 2,
+     "kind": "hidden_grid_dims"
+    }
+   ],
+   "group_segment": 0,
+   "private_segment": 0,
+   "wavefront_size": 32,
+   "max_flat_workgroup_size": 1024,
+   "vgpr": 8,
+   "sgpr": 10
+  }
+ ]
+}
