@@ -223,10 +223,8 @@ def wmma_body[MT: Int](
                         bitcast[DType.int16, 8](a), bitcast[DType.int16, 8](b), p.slice[8, offset=at]()
                     )
                     p = p.insert[offset=at](d)
-                comptime if MT > 1:
-                    llvm_intrinsic["llvm.amdgcn.sched.barrier", NoneType](Int32(0))
-            # keep a K step's A reads with its WMMAs (two tiles: a group's): hoisted all at once they hold 16 * MT uint4
-            # (64 VGPRs a tile), which costs the one-tile kernel its second block per CU and spills the two-tile one
+            # keep a K step's A reads with its WMMAs: hoisted all at once they hold 16 * MT uint4 (64 VGPRs a tile),
+            # which costs the one-tile kernel its second block per CU and spills the two-tile one
             llvm_intrinsic["llvm.amdgcn.sched.barrier", NoneType](Int32(0))
         comptime for j in range(SLAB):  # then the groups in order
             if UInt32(j) < groups:

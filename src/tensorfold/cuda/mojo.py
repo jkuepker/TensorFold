@@ -1,8 +1,8 @@
 """Mojo GPU kernels as HIP code objects: ``mojo build --emit object --target-accelerator <arch>`` embeds one complete
-AMDGPU ELF per instantiated kernel in the host object; they are carved out (as ``tools/mojo_gate/hipmodule/mojo2hsaco.py``
-does) into ``<kernel>.hsaco`` files plus a ``manifest.json`` (symbol, kernarg layout, registers), which a C++
-extension loads with ``hipModuleLoadData``. Built at first use and cached by the source's hash, the compiler's
-version and the GPU architecture, the way ``build.load`` caches the HIP extensions."""
+AMDGPU ELF per instantiated kernel in the host object; they are carved out (as ``tools/mojo_gate/hipmodule/
+mojo2hsaco.py`` does) into ``<kernel>.hsaco`` files plus a ``manifest.json`` (symbol, kernarg layout, registers),
+which a C++ extension loads with ``hipModuleLoadData``. Built at first use and cached by the source's hash, the
+compiler's version and the GPU architecture, the way ``build.load`` caches the HIP extensions."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def _build(source: Path, arch: str, out: Path) -> None:
     with tempfile.TemporaryDirectory(dir=out.parent) as td:
         obj = Path(td) / (source.stem + ".o")
         r = subprocess.run([mojo_binary(), "build", "--emit", "object", "--target-accelerator", arch, str(source),
-                            "-o", str(obj)], capture_output=True, text=True)
+                            "-o", str(obj)], capture_output=True, text=True, check=False)
         if r.returncode:
             raise RuntimeError(f"mojo build {source.name} failed:\n{r.stderr}")
         stage = Path(td) / "out"
@@ -101,7 +101,7 @@ def carve(blob: bytes, source: Path, arch: str, outdir: Path) -> dict:
     """Write each embedded kernel's code object to ``outdir`` and return the manifest (mojo2hsaco.py's)."""
 
     stem = source.stem
-    defs = re.findall(r"^def\s+(\w+)\s*[\[(]", source.read_text(), re.M)
+    defs = re.findall(r"^def\s+(\w+)\s*[\[(]", source.read_text(), re.MULTILINE)
     manifest: dict = {"arch": arch, "source": source.name, "kernels": []}
     for elf in carve_elfs(blob):
         md = amdgpu_metadata(elf)

@@ -1,6 +1,6 @@
 """Phase 1 microbench: the Mojo lane matmul (TF_ROCM_LANE=mojo) against the HIP WMMA lane on the 27B's decode
-projections, cold weights. Each lane runs a captured graph of CALLS matmuls over rotating weight copies (together
-past the R9700's 64 MB MALL, so every call streams its weights from memory), timed with events; lanes alternate over
+projections, cold weights. Each lane runs a captured graph of matmuls over rotating weight copies (512 MB together,
+past the R9700's 64 MB MALL, each read once a replay, so every call streams its weights from memory), timed with events; lanes alternate over
 ROUNDS and the median counts. GB/s is the weight bytes (words + scales + biases) a call reads over its time.
 
 usage (container, card B, fleetq slot held): PYTHONPATH=src python tools/mojo_gate/qmm_bench.py [--rows 1,4,12,16]
@@ -79,13 +79,17 @@ def main():
         for m in rows:
             x = torch.randn(m, k, generator=gen, device="cuda").bfloat16()
             xs = qmm_groups.group_sums(x)
-            assert torch.equal(qmm_groups.gemv(x, *ws[0], n, xs, wmma=True), qmm_groups.gemv(x, *ws[0], n, xs, mojo=True))
-            gw = graph(lambda i: qmm_groups.gemv(x, *ws[i % copies], n, xs, wmma=True), a.calls)
-            gm = graph(lambda i: qmm_groups.gemv(x, *ws[i % copies], n, xs, mojo=True), a.calls)
+            assert torch.equal(qmm_groups.gemv(x, *ws[0], n, xs, wmma=True),
+                               qmm_groups.gemv(x, *ws[0], n, xs, mojo=True))
+            calls = max(a.calls, copies)                # every copy once a replay: tiny weights stay cold too
+            gw = graph(lambda i, x=x, xs=xs, ws=ws, c=copies, n=n:
+                       qmm_groups.gemv(x, *ws[i % c], n, xs, wmma=True), calls)
+            gm = graph(lambda i, x=x, xs=xs, ws=ws, c=copies, n=n:
+                       qmm_groups.gemv(x, *ws[i % c], n, xs, mojo=True), calls)
             tw, tm = [], []
             for _ in range(a.rounds):
-                tw.append(timed(gw, a.calls))
-                tm.append(timed(gm, a.calls))
+                tw.append(timed(gw, calls))
+                tm.append(timed(gm, calls))
             w, mj = statistics.median(tw), statistics.median(tm)
             worst = max(worst, mj / w)
             print(f"| {name} | {n} | {k} | {m} | {w:.1f} | {mj:.1f} | {nbytes / w / 1e3:.0f} | {nbytes / mj / 1e3:.0f} "

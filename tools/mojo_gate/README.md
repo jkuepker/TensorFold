@@ -61,3 +61,34 @@ qmm_rocm.cu wmma kernel uses.
 
 setup.sh, run.sh, run_all.sh, vecadd.mojo, ops/ (path A op), pathA.py, pathB.mojo/.py, intr.mojo/.py,
 isa_dump.sh, bw.mojo/.py, isa/.
+
+## Phase 1: the lane matmul in Mojo (`TF_ROCM_LANE=mojo`)
+
+`src/tensorfold/cuda/kernels/qmm_rocm.mojo` ports `qmm_rocm.cu`'s `wmma_kernel` (one tile: `wmma_mt1`, two tiles:
+`wmma_mt2`, the only instantiations the wmma lane launches) and `reduce_kernel` (the dot2 lane's; the wmma lane adds
+its K slices in-kernel, so the mojo lane never launches it: it is ported and tested on its own). `cuda/mojo.py`
+builds the source to .hsaco at first use (cached under the torch extensions dir by source hash + `mojo --version` +
+arch); `qmm_rocm_mojo.cu` loads them once and launches with hipModuleLaunchKernel on torch's current stream, with
+`gemv_groups`' schedule (32-row passes, shape-fixed K slices, persistent grid from module occupancy).
+
+Bits: equal to the HIP wmma lane on every test_qmm_rocm.py shape at rows 1, 4, 8, 12, 16, 17, 33, 40 and on the 27B's
+projections at rows 1, 4, 8, 12, 16, bf16 and fp32 out (tests/cuda/test_qmm_rocm_mojo.py).
+
+Speed (qmm_bench.py, results in qmm_bench_results.txt, cold weights, graph-replayed): at rows 1-16 the Mojo lane
+takes 69-99% of the HIP lane's time on every 27B projection (worst: attn q at 16 rows, 0.99). What it took to get there from a literal port (10-50%
+slower at first):
+- 32-bit unsigned index math (Mojo `Int` is 64-bit signed: floor div/mod sequences and 64-bit address pairs);
+- `pair()` written per word: as a 4-wide vector LLVM narrowed it to 16-bit ops (240 v_and/or_b16 vs 64 v_and_or_b32);
+- scales and biases in 32-bit lanes: packed two to a VGPR, the d16_hi load waits out the d16 one, a full memory
+  round trip inside the slab-ahead prefetch (hipcc packs some too: 4 d16_hi loads; with the look-ahead below, this
+  is why the small projections now run 15-30% faster than the HIP lane);
+- `llvm.amdgcn.sched.barrier` per K step: the scheduler hoisted all 16 A reads (64 VGPRs), 195 VGPRs cost the
+  second block per CU (hipcc: 153; Mojo now 179, both 2 blocks/CU);
+- the next slab's input rows and group sums loaded a step ahead, before that step's weight prefetch (loads return in
+  order, so staging no longer waits on DRAM latency);
+- 32-bit output/partial indices (64-bit ones were hoisted out of the loop and spilled the two-tile kernel), after
+  which the two-tile kernel keeps the same one barrier per K step (251 VGPRs, no spills).
+The two-tile kernel (rows 17-32, not in the acceptance rows) is 66-108% of HIP's time (gate/up, gu and down at
+24 rows 3-8% slower; run to run they vary by a few percent).
+Absolute GB/s reach ~670, above the card's nominal ~640: some MALL reuse between rotated copies is likely, so
+compare the lanes by ratio.
