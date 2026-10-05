@@ -8,6 +8,7 @@
 # Kernels are top-level defs (one per instantiation: the carve names a PTX module after its def) and must be
 # instantiated by a host function, which is what tf_prefill_instantiate is for; it is never called.
 from std.sys import inlined_assembly
+from std.sys.intrinsics import _RegisterPackType
 from std.memory import bitcast, stack_allocation
 from std.utils import StaticTuple
 from max.gpu import thread_idx, block_idx, barrier, MAX_THREADS_PER_BLOCK_METADATA
@@ -65,6 +66,23 @@ def bf16x2(lo: Float32, hi: Float32) -> UInt32:
 @always_inline
 def bf16_rn(v: Float32) -> UInt16:
     return UInt16(bf16x2(v, Float32(0)) & 0xFFFF)
+
+
+# d = a b + d in place (qmm_frag.cuh's mma): the accumulator stays in its four scalar registers. Mojo's mma() keeps
+# SIMD[f32, 4] operands, which on sm_121 (v2f32 a legal type) travel as 64-bit pairs and cost a move each way.
+@always_inline
+def mma_acc(mut d: StaticTuple[Float32, 4 * MT * NT], o: Int, a: SIMD[U32, 4], b0: UInt32, b1: UInt32):
+    var r = inlined_assembly[
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, $9}, "
+        "{$10, $11, $12, $13};",
+        _RegisterPackType[Float32, Float32, Float32, Float32],
+        constraints="=f,=f,=f,=f,r,r,r,r,r,r,0,1,2,3",
+        has_side_effect=False,
+    ](a[0], a[1], a[2], a[3], b0, b1, d[o], d[o + 1], d[o + 2], d[o + 3])
+    d[o] = r[0]
+    d[o + 1] = r[1]
+    d[o + 2] = r[2]
+    d[o + 3] = r[3]
 
 
 @always_inline
@@ -139,7 +157,7 @@ def prefill_body[F32OUT: Bool](
             if n0 + off * 8 < npad:
                 async_copy[16](src.address_space_cast[AddressSpace.GLOBAL](), (ps + which * SB + off * 16).bitcast[UInt16]())
 
-    var acc = SIMD[F32, MT * NT * 4](0)
+    var acc = StaticTuple[Float32, 4 * MT * NT](Float32(0))  # tile (i, j) at 4 (i NT + j)
     comptime for s in range(STAGES - 1):
         if s < KG:
             load(s, s)
@@ -174,12 +192,8 @@ def prefill_body[F32OUT: Bool](
                 var wd = words[j * (GS // 32) + kt // 2]
                 var b0 = weight_pair(wd, UInt32((kt & 1) * 8), sv[j], bv[j])
                 var b1 = weight_pair(wd, UInt32((kt & 1) * 8 + 4), sv[j], bv[j])
-                var bf = bitcast[BF, 4](SIMD[U32, 2](b0, b1))
                 comptime for i in range(MT):
-                    comptime o = (i * NT + j) * 4
-                    var d = SIMD[F32, 4](0)
-                    mma(d, a.slice[8, offset = 8 * i](), bf, acc.slice[4, offset=o]())
-                    acc = acc.insert[offset=o](d)
+                    mma_acc(acc, 4 * (i * NT + j), bitcast[U32, 4](a.slice[8, offset = 8 * i]()), b0, b1)
     async_copy_wait_group(0)
     barrier()
     comptime for i in range(MT):
@@ -188,9 +202,8 @@ def prefill_body[F32OUT: Bool](
             comptime for h in range(2):
                 var row = m0 + wm * (BM // WM) + i * 16 + (lane >> 2) + h * 8
                 if row < M:
-                    comptime o = (i * NT + j) * 4 + 2 * h
-                    var v0 = acc[o]
-                    var v1 = acc[o + 1]
+                    var v0 = acc[4 * (i * NT + j) + 2 * h]
+                    var v1 = acc[4 * (i * NT + j) + 2 * h + 1]
                     comptime if F32OUT:
                         var o32 = dst.bitcast[Float32]() + row * N + col
                         if col < N:

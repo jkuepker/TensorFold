@@ -40,15 +40,19 @@ def main():
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--trials", type=int, default=7)
     ap.add_argument("--tile", type=int, default=-1)
+    ap.add_argument("--quick", action="store_true", help="three cases only (tuning)")
     args = ap.parse_args()
     p = torch.cuda.get_device_properties(0)
     print(f"device {p.name} sm_{p.major}{p.minor} {p.multi_processor_count} SMs, torch {torch.__version__}")
     print(f"{'projection':12s} {'N':>6s} {'K':>6s} {'rows':>5s} {'cuda ms':>8s} {'mojo ms':>8s} {'cuda TF':>8s} "
           f"{'mojo TF':>8s} {'speedup':>9s}")
     ratios = []
-    for name, n, k in SHAPES:
+    cases = [(s, m) for s in SHAPES for m in ROWS]
+    if args.quick:
+        cases = [(SHAPES[0], 4096), (SHAPES[1], 512), (SHAPES[7], 2048)]
+    for (name, n, k), m in cases:
         q = weight(n, k)
-        for m in ROWS:
+        if True:
             x = torch.randn(m, k, device="cuda").bfloat16()
             out_c = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
             out_m = torch.empty_like(out_c)
