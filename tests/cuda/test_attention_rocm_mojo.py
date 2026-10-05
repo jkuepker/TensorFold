@@ -184,6 +184,23 @@ def test_mojo_reads_no_key_past_an_exact_cache(monkeypatch, w, p, kv8):
     torch.cuda.synchronize()
 
 
+def test_mojo_tree_attention_needs_no_hip_extension(monkeypatch):
+    """TF_ROCM_TREE_KERNEL=mojo routes and runs without attention_rocm.cu."""
+
+    w, p = 9, 513
+    inputs = _inputs(w, p)
+    q, kn, vn = inputs[:3]
+    plan = shared.plan([_tree(w)], [p], H27 // HK27, "cuda")
+    offs = _offs([inputs[3:]])
+    want = _attend(monkeypatch, "wmma", q, kn, vn, offs, plan, 1 / 16, False)
+
+    def refuse():
+        raise AssertionError("the Mojo tree attention built the HIP extension")
+
+    monkeypatch.setattr(shared, "_rocm", refuse)
+    assert torch.equal(want, _attend(monkeypatch, "mojo", q, kn, vn, offs, plan, 1 / 16, False))
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
 def test_mojo_gives_the_hip_bits_on_each_gpu():
     """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its

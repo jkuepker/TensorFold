@@ -246,12 +246,13 @@ def gemv(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: tor
         xs = group_sums(x)
     wmma = wmma or mojo
     fill = wmma_fill()
-    slices = _slices(kg, n, wmma, fill)
+    slices = _slices(kg, n, "mojo" if mojo else "wmma" if wmma else "dot2", fill)
     out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     part = (torch.empty((slices * min(m, 32 if wmma else 16) * n,), dtype=torch.float32, device=x.device)
             if slices > 1 or f32 else out)                 # unread when one slice writes its output directly
     if mojo:
-        _mojo(x.get_device()).gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, fill, _counts(x.device, n))
+        _mojo(x.get_device()).gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, fill,
+                                          _counts(x.device, n))
     else:
         _rocm().gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, wmma, fill, _counts(x.device, n))
     return out
@@ -281,9 +282,14 @@ def wmma_fill() -> int:
 
 
 @lru_cache(maxsize=None)
-def _slices(kg: int, n: int, wmma: bool, fill: int) -> int:
+def _slices(kg: int, n: int, kind: str, fill: int) -> int:
+    """K slices of a (kg groups, n outputs) weight for lane ``kind`` (``wmma``, ``mojo`` or ``dot2``): the Mojo lane
+    asks its own launcher (the same schedule), so it never builds ``qmm_rocm.cu``."""
+
+    if kind == "mojo":
+        return _mojo_ext().wmma_slices(kg, n, fill)
     ext = _rocm()
-    return ext.wmma_slices(kg, n, fill) if wmma else ext.gemv_slices(kg)
+    return ext.wmma_slices(kg, n, fill) if kind == "wmma" else ext.gemv_slices(kg)
 
 
 def reload_settings() -> None:

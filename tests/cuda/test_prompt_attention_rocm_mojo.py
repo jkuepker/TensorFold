@@ -80,6 +80,28 @@ def test_mojo_prompt_attention_is_routed_by_tf_rocm_attn_kernel(monkeypatch):
     assert torch.equal(outs[0], outs[1])
 
 
+def test_mojo_prompt_attention_needs_no_hip_extension(monkeypatch):
+    """TF_ROCM_ATTN_KERNEL=mojo routes and runs without attention_rocm.cu."""
+
+    gen = torch.Generator(device="cuda").manual_seed(4)
+    k, v = _caches(gen, 700, 4, False)
+    q = torch.randn(300, 24, D, generator=gen, device="cuda").bfloat16()
+    want = torch.empty_like(q)
+    prefill_attention._rocm().attention(q, k, v, want, 400, D ** -0.5, *prefill_attention.rocm_rows(300))
+
+    def refuse():
+        raise AssertionError("the Mojo prompt attention built the HIP extension")
+
+    monkeypatch.setenv("TF_ROCM_ATTN_KERNEL", "mojo")
+    monkeypatch.setattr(prefill_attention, "_rocm", refuse)
+    prefill_attention._rocm_kernel.cache_clear()
+    try:
+        got = prefill_attention.attention(q, k, v, 400, scale=D ** -0.5)
+    finally:
+        prefill_attention._rocm_kernel.cache_clear()
+    assert torch.equal(want, got)
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
 def test_mojo_prompt_attention_gives_the_hip_bits_on_each_gpu():
     """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its

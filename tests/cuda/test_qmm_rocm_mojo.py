@@ -93,6 +93,28 @@ def test_mojo_lane_is_picked_by_tf_rocm_lane(monkeypatch):
         qmm_groups.lane_kernel.cache_clear()
 
 
+def _refuse():
+    raise AssertionError("the Mojo lane built the HIP extension")
+
+
+def test_mojo_lane_needs_no_hip_extension(monkeypatch):
+    """TF_ROCM_LANE=mojo takes its K slices from its own launcher: qmm_rocm.cu is never built."""
+
+    g, gen = _weight(1024, 5120, 11)
+    x = torch.randn(12, 5120, generator=gen, device="cuda").bfloat16()
+    monkeypatch.setenv("TF_ROCM_LANE", "mojo")
+    monkeypatch.setattr(qmm_groups, "_rocm", _refuse)
+    qmm_groups.lane_kernel.cache_clear()
+    qmm_groups._slices.cache_clear()
+    try:
+        got = qmm_groups.matmul(x, *g, 1024)
+    finally:
+        monkeypatch.undo()
+        qmm_groups.lane_kernel.cache_clear()
+        qmm_groups._slices.cache_clear()
+    assert torch.equal(got, qmm_groups.gemv(x, *g, 1024, wmma=True))
+
+
 @pytest.mark.parametrize("slices,total", [(2, 1), (3, 1000), (16, 70001)])
 @pytest.mark.parametrize("f32", [False, True])
 def test_mojo_reduce_adds_slices_in_order(slices, total, f32):
