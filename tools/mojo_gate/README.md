@@ -142,3 +142,48 @@ building in this image).
 
 Toolchain and launch-path gate on spark2: see `spark/README.md` (results table) and `cumodule/` (PTX/cubin carve-out
 and the `cuModuleLoadData` + `cuLaunchKernel` launch route, the NVIDIA twin of `hipmodule/`).
+
+## Phase 5: prefill on the R9700 (`TF_ROCM_PREFILL_GEMM`, `TF_ROCM_ATTN_KERNEL`, `TF_ROCM_PREFILL8_GEMM` = mojo)
+
+Profile first (`prefill_profile.py`, results and raw tables in `prefill_profile.txt`): the 27B's prompt on card B runs
+in 2560-row chunks; at 16k the bf16 GEMM kernel takes 73% of GPU time (+5.5% widening the weight to bf16), prompt
+attention 8% (13% at 30k), the DeltaNet chain 7%, norms/glue 5%. Ported in that order:
+
+- `prefill_rocm.mojo` `gemm_*` (bf16, behind `TF_ROCM_PREFILL_GEMM=mojo`): the Triton `_gemm` after `dequantize`.
+  Bits: every output is one fp32 chain of `v_wmma_f32_16x16x16_bf16` over K in 16-steps from zero, the weight as A
+  (Triton's transposed WMMA layout), bf16 nearest even; so any tile gives Triton's bits. 128x256 tiles, 8 waves of
+  64x64, K staged 64 at a time in one LDS buffer, the next step's global loads before the WMMAs. 1.12-1.46x Triton at
+  2048-2500 rows (107 -> 118-142 TFLOPS; the card's sustained WMMA peak measures ~206, `peak/`).
+- `attention_rocm.mojo` `prompt_*` (behind `TF_ROCM_ATTN_KERNEL=mojo`): attention_rocm.cu's `prompt_kernel` on Phase
+  3's fold, query and loaders (one Mojo kernel takes any heads-a-KV-head count and 1 or 2 row tiles at run time).
+  Keys past the chunk read the last key's row instead of zeros (masked, probability 0: same sums). 1.05-1.11x HIP.
+- `prefill_rocm.mojo` `gemm8_*` (FP8, behind its own `TF_ROCM_PREFILL8_GEMM=mojo`): `_gemm8`'s bits (four chained
+  fp8 WMMAs a group from zero, `fma(p, s, acc)` as Triton's backend contracts it, the bias as a bf16 WMMA chain, then
+  the row scale), but 0.76-0.99x Triton (mostly 0.93-0.96): not on under the bf16 flag.
+
+What it took (beyond Phases 1/3):
+- bf16 GEMM, from 1.05x to 1.2x: wave-uniform bases with comptime LDS offsets (the `// 2` of a runtime sum kept a
+  VGPR per fragment address); fragment reads for the next K step issued before this step's WMMAs, sched barriers
+  holding them there (the literal schedule waited on each A fragment); global loads clamped to the last real row
+  instead of branching (an output reads only its own row and column). Tried and dropped: two LDS buffers (K 32 to fit
+  64 KB, more barriers: slower), fragments straight from global memory (0.25x), 128x128 tiles.
+- Ablations (128x256): LDS fragments + WMMA alone reach ~145 TFLOPS; staging and barriers cost ~10%, global loads
+  ~8%. That is the remaining gap to peak.
+- Prompt attention: a kernel bounded at 640 threads ran a 512-thread block 5-8% slower than one bounded at 512, so
+  there is one code object a block size (8/12/16/20 waves), short names (long ones lose the symbol separator
+  `cuda/mojo.py` matches).
+- FP8: 64x64 waves hold 16 group dots (128 VGPRs) beside the accumulators and spill in Mojo (Triton fits them in
+  254); 64x32 waves fit (190) but read more LDS per WMMA. Prefetching scales a step ahead measured slower.
+
+Tests: new `test_prefill_gemm_rocm_mojo.py` (80), `test_prefill_gemm8_rocm_mojo.py` (54), `test_prompt_attention_rocm_
+mojo.py` (17): Mojo == reference bits on the existing test shapes, the 27B's projections at 37/2048/2341/2500/2560/4096
+rows (all tiles, bf16 and fp32 out), prompt attention at every head grouping, RB 1/2, loaders on/off, bf16 and packed
+FP8 caches, and the 27B's (p0, W) chunks at 4k/16k/30k. The Qwen27 GPU tests, prefill/prompt-attention/attention tests
+and the Mojo test files: 535 passed, 18 skipped, 1 error with all defaults and with all five Mojo flags (the error,
+both runs: test_qwen27_server_errors' startup budget on a 32 GB card).
+
+End to end (card B, 27B + DFlash2, default serve, A = defaults, B = `TF_ROCM_LANE TF_ROCM_TREE_KERNEL
+TF_ROCM_PREFILL_GEMM TF_ROCM_PREFILL8_GEMM TF_ROCM_ATTN_KERNEL` = mojo; localeval speed, gen 64, 3 reps): prefill
+tok/s A 1477-1480 / 1485-1486 / 1416-1418 at 4k/16k/30k, B 1660-1668 / 1687-1688 / 1608-1609 (+12.5%, +13.6%,
++13.5%); greedy replies byte-identical in all four (8ec3b3018edf, 27b232152250, drafts on and off). Runs
+20261004-231556-adhoc-p5-A1-default, -231907-...-B1-mojo, -232140-...-A2-default, -232423-...-B2-mojo.

@@ -1,0 +1,67 @@
+# tools/mojo_gate/prefill_bench.py, R9700 card B (pci_bus_id 7), gfx1201, torch 2.11.0+rocm7.14, Mojo 1.1.0; fleetq #484/#485, 2026-10-04.
+# Kernels' rounds interleaved; x = reference time / Mojo time (above 1: Mojo faster). Every Mojo output equal to the reference's bits.
+# WMMA peak on this card (tools/mojo_gate/peak, register-only chains): bf16 ~206 TFLOPS sustained, fp8 ~310.
+
+## bf16 prompt GEMM (TF_ROCM_PREFILL_GEMM=mojo; default tile 128x256): Triton _gemm vs Mojo
+AMD Radeon AI PRO R9700 pci_bus_id=7 gfx1201
+shape                   N      K     M         triton           mojo 128x256           mojo 256x128
+attn q              12288   5120  2048    2402us 107.3T    2034us 126.7T x1.18    2030us 126.9T x1.18
+attn kv              2048   5120  2048     391us 109.7T     317us 135.6T x1.24     314us 136.7T x1.25
+attn o / gdn out     5120   6144  2048    1324us  97.3T     908us 141.8T x1.46     909us 141.7T x1.46
+gdn qkv             10240   5120  2048    2062us 104.1T    1770us 121.3T x1.16    1745us 123.0T x1.18
+gdn zba              6240   5120  2048    1384us  94.5T    1011us 129.5T x1.37     998us 131.2T x1.39
+mlp gate / up       17408   5120  2048    3390us 107.7T    2881us 126.7T x1.18    2841us 128.5T x1.19
+mlp down             5120  17408  2048    3542us 103.1T    2942us 124.1T x1.20    2920us 125.0T x1.21
+attn q              12288   5120  2341    2876us 102.4T    2491us 118.2T x1.15    2564us 114.9T x1.12
+attn kv              2048   5120  2341     484us 101.5T     400us 122.7T x1.21     397us 123.7T x1.22
+attn o / gdn out     5120   6144  2341    1539us  95.7T    1313us 112.2T x1.17    1379us 106.8T x1.12
+gdn qkv             10240   5120  2341    2436us 100.8T    2075us 118.3T x1.17    2128us 115.3T x1.14
+gdn zba              6240   5120  2341    1568us  95.4T    1364us 109.7T x1.15    1409us 106.1T x1.11
+mlp gate / up       17408   5120  2341    3988us 104.6T    3416us 122.1T x1.17    3513us 118.8T x1.14
+mlp down             5120  17408  2341    4375us  95.4T    3492us 119.5T x1.25    3728us 111.9T x1.17
+attn q              12288   5120  2500    3017us 104.3T    2577us 122.1T x1.17    2594us 121.3T x1.16
+attn kv              2048   5120  2500     491us 106.7T     408us 128.6T x1.21     405us 129.5T x1.21
+attn o / gdn out     5120   6144  2500    1602us  98.2T    1408us 111.7T x1.14    1391us 113.0T x1.15
+gdn qkv             10240   5120  2500    2539us 103.2T    2172us 120.7T x1.17    2154us 121.7T x1.18
+gdn zba              6240   5120  2500    1626us  98.3T    1441us 110.9T x1.13    1419us 112.6T x1.15
+mlp gate / up       17408   5120  2500    4183us 106.5T    3593us 124.0T x1.16    3526us 126.4T x1.19
+mlp down             5120  17408  2500    4600us  96.9T    3773us 118.1T x1.22    3746us 119.0T x1.23
+
+## FP8 prompt GEMM (TF_ROCM_PREFILL8_GEMM=mojo; default tile 128x128): Triton _gemm8 vs Mojo gemm8
+shape                   N      K     M         triton           mojo 128x128          mojo 128x128w
+attn q              12288   5120  2048    1816us 141.9T    1852us 139.2T x0.98    2371us 108.7T x0.77
+attn kv              2048   5120  2048     288us 149.1T     290us 148.0T x0.99     350us 122.6T x0.82
+attn o / gdn out     5120   6144  2048     767us 168.0T     832us 154.9T x0.92    1200us 107.4T x0.64
+gdn qkv             10240   5120  2048    1531us 140.3T    1590us 135.1T x0.96    2055us 104.5T x0.74
+gdn zba              6240   5120  2048     818us 160.0T     871us 150.2T x0.94    1374us  95.3T x0.60
+mlp gate / up       17408   5120  2048    2439us 149.7T    2575us 141.8T x0.95    3394us 107.6T x0.72
+mlp down             5120  17408  2048    2443us 149.5T    2603us 140.2T x0.94    3302us 110.6T x0.74
+attn q              12288   5120  2341    2117us 139.1T    2201us 133.8T x0.96    2729us 108.0T x0.78
+attn kv              2048   5120  2341     338us 145.4T     362us 135.8T x0.93     439us 111.8T x0.77
+attn o / gdn out     5120   6144  2341     950us 155.0T    1003us 146.9T x0.95    1483us  99.3T x0.64
+gdn qkv             10240   5120  2341    1785us 137.5T    1864us 131.7T x0.96    2310us 106.3T x0.77
+gdn zba              6240   5120  2341     955us 156.7T    1257us 119.0T x0.76    1496us 100.0T x0.64
+mlp gate / up       17408   5120  2341    2888us 144.5T    3045us 137.1T x0.95    3777us 110.5T x0.76
+mlp down             5120  17408  2341    2903us 143.8T    3080us 135.5T x0.94    3795us 110.0T x0.76
+attn q              12288   5120  2500    2216us 141.9T    2318us 135.7T x0.96    2882us 109.2T x0.77
+attn kv              2048   5120  2500     345us 152.1T     370us 141.9T x0.93     448us 116.9T x0.77
+attn o / gdn out     5120   6144  2500     972us 161.9T    1266us 124.3T x0.77    1515us 103.9T x0.64
+gdn qkv             10240   5120  2500    1883us 139.2T    1936us 135.4T x0.97    2428us 108.0T x0.78
+gdn zba              6240   5120  2500    1017us 157.1T    1284us 124.4T x0.79    1565us 102.1T x0.65
+mlp gate / up       17408   5120  2500    3020us 147.6T    3211us 138.8T x0.94    3982us 111.9T x0.76
+mlp down             5120  17408  2500    3022us 147.5T    3211us 138.8T x0.94    4001us 111.4T x0.76
+
+## prompt attention (TF_ROCM_ATTN_KERNEL=mojo): attention_rocm.cu prompt_kernel vs Mojo; 24 heads, 4 KV heads, D 256
+chunk          p0     W cache                hip                     mojo
+4k first        0  2048  bf16       817us  63.1T       780us  66.1T x1.05
+4k last      2048  2048  bf16      2369us  65.3T      2229us  69.4T x1.06
+16k first       0  2340  bf16       963us  69.9T       907us  74.2T x1.06
+16k last    14043  2341  bf16     12296us  71.2T     11353us  77.1T x1.08
+30k first       0  2500  bf16      1320us  58.2T      1255us  61.2T x1.05
+30k last    27500  2500  bf16     23370us  75.6T     21581us  81.8T x1.08
+4k first        0  2048   fp8       849us  60.7T       794us  64.9T x1.07
+4k last      2048  2048   fp8      2383us  64.9T      2209us  70.0T x1.08
+16k first       0  2340   fp8      1006us  66.9T       944us  71.3T x1.07
+16k last    14043  2341   fp8     12510us  70.0T     11415us  76.7T x1.10
+30k first       0  2500   fp8      1331us  57.7T      1202us  63.9T x1.11
+30k last    27500  2500   fp8     23856us  74.0T     21809us  81.0T x1.09

@@ -295,3 +295,140 @@ fast_prefill=True fp8=True chunk=2560
   void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     36x        0.0 ms    0.0%
   void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::     12x        0.0 ms    0.0%
   Memcpy HtoD (Host -> Device)                                                1x        0.0 ms    0.0%
+
+With TF_ROCM_PREFILL_GEMM=mojo TF_ROCM_ATTN_KERNEL=mojo (bf16 prompts), fleetq #485:
+
+device AMD Radeon AI PRO R9700 pci_bus_id=7 gfx1201
+fast_prefill=True fp8=False chunk=2560
+== bf16 prompts (default) {'TF_ROCM_ATTN_KERNEL': 'mojo', 'TF_ROCM_PREFILL_GEMM': 'mojo'}: 4096 tokens, chunk rows 2560; wall 2.175 s = 1,884 tok/s; GPU kernel time 1,971.0 ms ==
+-- by role (device time of kernels launched inside each call) --
+  projection GEMMs (all)                       1593.5 ms   80.8%
+  gdn chain                                     169.5 ms    8.6%
+  norms/glue                                    113.6 ms    5.8%
+  prompt attention                               45.4 ms    2.3%
+  gdn pre (conv, gates)                          41.6 ms    2.1%
+  other (not in a wrapped call)                   7.4 ms    0.4%
+-- GEMMs by shape --
+  gemm N=17408 K=5120                           737.0 ms   37.4%
+  gemm N=5120 K=17408                           365.3 ms   18.5%
+  gemm N=10240 K=5120                           164.0 ms    8.3%
+  gemm N=5120 K=6144                            146.6 ms    7.4%
+  gemm N=6240 K=5120                            104.3 ms    5.3%
+  gemm N=12288 K=5120                            65.1 ms    3.3%
+  gemm N=2048 K=5120                             11.0 ms    0.6%
+-- norms/glue by call --
+  norms/glue: swiglu                             46.7 ms    2.4%
+  norms/glue: add_rmsnorm                        30.7 ms    1.6%
+  norms/glue: gated_norm                         24.8 ms    1.3%
+  norms/glue: gate_mul                            5.8 ms    0.3%
+  norms/glue: attn_prep                           5.4 ms    0.3%
+  norms/glue: embedding                           0.2 ms    0.0%
+  norms/glue: kv_fp8                              0.0 ms    0.0%
+-- kernels (self device time) --
+  prefill_rocm_gemm_128x256_Poi6A6AoA6A6A_6aee35d8780e584c                  768x     1432.2 ms   72.7%
+  void (anonymous namespace)::chain_kernel<__hip_bfloat16, 64, 32>(__hip     96x      169.5 ms    8.6%
+  _dequant                                                                  768x      158.8 ms    8.1%
+  _swiglu                                                                   128x       46.7 ms    2.4%
+  attention_rocm_prompt_p16b_Po6A6AoA6A6A_fc027c4dcd0899ab                   32x       45.4 ms    2.3%
+  _gdn_pre                                                                   96x       41.6 ms    2.1%
+  _add_rmsnorm                                                              257x       30.7 ms    1.6%
+  _gated_norm                                                                96x       24.8 ms    1.3%
+  void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::    352x        7.1 ms    0.4%
+  _gate_mul                                                                  32x        5.8 ms    0.3%
+  _attn_prep                                                                 32x        5.4 ms    0.3%
+  Memcpy DtoD (Device -> Device)                                             96x        1.1 ms    0.1%
+  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc     48x        1.1 ms    0.1%
+  void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at:     96x        0.5 ms    0.0%
+  _embed                                                                      2x        0.2 ms    0.0%
+  void at::native::vectorized_elementwise_kernel<8, at::native::FillFunc     48x        0.1 ms    0.0%
+  Memcpy HtoD (Host -> Device)                                                1x        0.0 ms    0.0%
+  void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat      6x        0.0 ms    0.0%
+  void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::      2x        0.0 ms    0.0%
+== bf16 prompts (default) {'TF_ROCM_ATTN_KERNEL': 'mojo', 'TF_ROCM_PREFILL_GEMM': 'mojo'}: 16384 tokens, chunk rows 2560; wall 9.455 s = 1,733 tok/s; GPU kernel time 8,666.0 ms ==
+-- by role (device time of kernels launched inside each call) --
+  projection GEMMs (all)                       6583.0 ms   76.0%
+  prompt attention                              733.2 ms    8.5%
+  gdn chain                                     686.7 ms    7.9%
+  norms/glue                                    461.2 ms    5.3%
+  gdn pre (conv, gates)                         170.8 ms    2.0%
+  other (not in a wrapped call)                  31.1 ms    0.4%
+-- GEMMs by shape --
+  gemm N=17408 K=5120                          3052.3 ms   35.2%
+  gemm N=5120 K=17408                          1528.3 ms   17.6%
+  gemm N=10240 K=5120                           681.0 ms    7.9%
+  gemm N=5120 K=6144                            578.9 ms    6.7%
+  gemm N=6240 K=5120                            420.0 ms    4.8%
+  gemm N=12288 K=5120                           274.9 ms    3.2%
+  gemm N=2048 K=5120                             47.7 ms    0.6%
+-- norms/glue by call --
+  norms/glue: swiglu                            186.6 ms    2.2%
+  norms/glue: add_rmsnorm                       126.9 ms    1.5%
+  norms/glue: gated_norm                        102.4 ms    1.2%
+  norms/glue: gate_mul                           23.4 ms    0.3%
+  norms/glue: attn_prep                          21.4 ms    0.2%
+  norms/glue: embedding                           0.4 ms    0.0%
+  norms/glue: kv_fp8                              0.0 ms    0.0%
+-- kernels (self device time) --
+  prefill_rocm_gemm_128x256_Poi6A6AoA6A6A_6aee35d8780e584c                 2688x     6021.9 ms   69.5%
+  attention_rocm_prompt_p16b_Po6A6AoA6A6A_fc027c4dcd0899ab                  112x      733.2 ms    8.5%
+  void (anonymous namespace)::chain_kernel<__hip_bfloat16, 64, 32>(__hip    336x      686.7 ms    7.9%
+  _dequant                                                                 2688x      552.3 ms    6.4%
+  _swiglu                                                                   448x      186.6 ms    2.2%
+  _gdn_pre                                                                  336x      170.8 ms    2.0%
+  _add_rmsnorm                                                              897x      126.9 ms    1.5%
+  _gated_norm                                                               336x      102.4 ms    1.2%
+  void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::   1232x       31.8 ms    0.4%
+  _gate_mul                                                                 112x       23.4 ms    0.3%
+  _attn_prep                                                                112x       21.4 ms    0.2%
+  Memcpy DtoD (Device -> Device)                                            320x        6.3 ms    0.1%
+  void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at:    336x        1.7 ms    0.0%
+  _embed                                                                      7x        0.4 ms    0.0%
+  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc     48x        0.2 ms    0.0%
+  void at::native::vectorized_elementwise_kernel<8, at::native::FillFunc     48x        0.1 ms    0.0%
+  void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     21x        0.0 ms    0.0%
+  void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::      7x        0.0 ms    0.0%
+  Memcpy HtoD (Host -> Device)                                                1x        0.0 ms    0.0%
+== bf16 prompts (default) {'TF_ROCM_ATTN_KERNEL': 'mojo', 'TF_ROCM_PREFILL_GEMM': 'mojo'}: 30000 tokens, chunk rows 2560; wall 18.133 s = 1,654 tok/s; GPU kernel time 16,735.6 ms ==
+-- by role (device time of kernels launched inside each call) --
+  projection GEMMs (all)                      11957.8 ms   71.5%
+  prompt attention                             2286.3 ms   13.7%
+  gdn chain                                    1255.4 ms    7.5%
+  norms/glue                                    856.6 ms    5.1%
+  gdn pre (conv, gates)                         321.7 ms    1.9%
+  other (not in a wrapped call)                  57.8 ms    0.3%
+-- GEMMs by shape --
+  gemm N=17408 K=5120                          5478.1 ms   32.7%
+  gemm N=5120 K=17408                          2821.1 ms   16.9%
+  gemm N=10240 K=5120                          1218.9 ms    7.3%
+  gemm N=5120 K=6144                           1099.5 ms    6.6%
+  gemm N=6240 K=5120                            767.8 ms    4.6%
+  gemm N=12288 K=5120                           489.9 ms    2.9%
+  gemm N=2048 K=5120                             82.5 ms    0.5%
+-- norms/glue by call --
+  norms/glue: swiglu                            342.8 ms    2.0%
+  norms/glue: add_rmsnorm                       233.4 ms    1.4%
+  norms/glue: gated_norm                        197.0 ms    1.2%
+  norms/glue: gate_mul                           43.2 ms    0.3%
+  norms/glue: attn_prep                          39.4 ms    0.2%
+  norms/glue: embedding                           0.8 ms    0.0%
+  norms/glue: kv_fp8                              0.0 ms    0.0%
+-- kernels (self device time) --
+  prefill_rocm_gemm_128x256_Poi6A6AoA6A6A_6aee35d8780e584c                 4608x    10993.6 ms   65.7%
+  attention_rocm_prompt_p16b_Po6A6AoA6A6A_fc027c4dcd0899ab                  192x     2286.3 ms   13.7%
+  void (anonymous namespace)::chain_kernel<__hip_bfloat16, 64, 32>(__hip    576x     1255.4 ms    7.5%
+  _dequant                                                                 4608x      948.9 ms    5.7%
+  _swiglu                                                                   768x      342.8 ms    2.0%
+  _gdn_pre                                                                  576x      321.7 ms    1.9%
+  _add_rmsnorm                                                             1537x      233.4 ms    1.4%
+  _gated_norm                                                               576x      197.0 ms    1.2%
+  void at::native::elementwise_kernel_manual_unroll<128, 8, at::native::   2112x       56.8 ms    0.3%
+  _gate_mul                                                                 192x       43.2 ms    0.3%
+  _attn_prep                                                                192x       39.4 ms    0.2%
+  Memcpy DtoD (Device -> Device)                                            512x       13.1 ms    0.1%
+  void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at:    576x        2.9 ms    0.0%
+  _embed                                                                     12x        0.8 ms    0.0%
+  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc     48x        0.2 ms    0.0%
+  void at::native::vectorized_elementwise_kernel<8, at::native::FillFunc     48x        0.1 ms    0.0%
+  void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     36x        0.1 ms    0.0%
+  void at::native::elementwise_kernel_manual_unroll<128, 4, at::native::     12x        0.0 ms    0.0%
+  Memcpy HtoD (Host -> Device)                                                1x        0.0 ms    0.0%
