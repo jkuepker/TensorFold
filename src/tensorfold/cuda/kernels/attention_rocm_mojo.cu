@@ -1,7 +1,8 @@
 // Host side of the Mojo tree attention (attention_rocm.mojo, TF_ROCM_TREE_KERNEL=mojo): its code objects load once
-// with hipModuleLoadData and launch with hipModuleLaunchKernel on torch's current HIP stream, with the grids and
-// blocks attention_rocm.cu's tree_shared and tree_tail use and a grid of its own for the merge (a row's bits never
-// depend on it). No device code here.
+// per GPU with hipModuleLoadData (a module belongs to the device current when it loads) and launch with
+// hipModuleLaunchKernel on torch's current HIP stream of the tensors' GPU, with the grids and blocks
+// attention_rocm.cu's tree_shared and tree_tail use and a grid of its own for the merge (a row's bits never depend on
+// it). No device code here.
 
 #ifndef __HIPCC__
 #error "attention_rocm_mojo.cu is the ROCm Mojo tree attention's launcher"
@@ -12,8 +13,10 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -33,9 +36,37 @@ constexpr int MERGE_HEADS = 4;              // attention_rocm.mojo's MERGE_HEADS
 
 enum { SHARED_PIPE, SHARED_PIPE8, SHARED_FLAT, SHARED_FLAT8, TAIL16, TAIL8, MERGE, KERNELS };
 
-std::vector<hipFunction_t>& kernels() {
-    static std::vector<hipFunction_t> k;
-    return k;
+constexpr int MAX_GPUS = 16;
+
+struct Kernels {
+    hipFunction_t fn[KERNELS] = {};
+    std::atomic<bool> ready{false};
+};
+
+// one slot a GPU, loaded on its first use (a launch only indexes it); the slots never move
+Kernels g_kernels[MAX_GPUS];
+std::mutex g_load;
+
+// ``device`` current for a scope: a module loads on, and a launch runs on, its tensors' GPU
+struct OnDevice {
+    int prev = -1;
+    explicit OnDevice(int device) {
+        TF_HIP_CHECK(hipGetDevice(&prev));
+        if (prev == device) {
+            prev = -1;      // already current: nothing to set, nothing to restore
+        } else {
+            TF_HIP_CHECK(hipSetDevice(device));
+        }
+    }
+    ~OnDevice() {
+        if (prev >= 0) (void)hipSetDevice(prev);
+    }
+};
+
+int device_of(const at::Tensor& t) {
+    const int device = t.get_device();
+    TORCH_CHECK(device >= 0 && device < MAX_GPUS, "the Mojo tree attention takes tensors on a GPU");
+    return device;
 }
 
 hipFunction_t load_one(const std::string& path, const std::string& symbol) {
@@ -50,15 +81,16 @@ hipFunction_t load_one(const std::string& path, const std::string& symbol) {
     return fn;
 }
 
-hipFunction_t kernel(int which) {
-    const auto& k = kernels();
-    TORCH_CHECK(k.size() == KERNELS, "the Mojo tree attention's kernels are not loaded");
-    return k[which];
+hipFunction_t kernel(int device, int which) {
+    const Kernels& k = g_kernels[device];
+    TORCH_CHECK(k.ready.load(std::memory_order_acquire), "the Mojo tree attention's kernels are not loaded on GPU ",
+                device);
+    return k.fn[which];
 }
 
-void launch(hipFunction_t fn, dim3 grid, int block, void** args) {
+void launch(hipFunction_t fn, int device, dim3 grid, int block, void** args) {
     TF_HIP_CHECK(hipModuleLaunchKernel(fn, grid.x, grid.y, grid.z, block, 1, 1, 0,
-                                       at::hip::getCurrentHIPStream().stream(), args, nullptr));
+                                       at::hip::getCurrentHIPStream(device).stream(), args, nullptr));
 }
 
 bool tree_supported(int heads, int kv_heads, int dim) {
@@ -68,13 +100,16 @@ bool tree_supported(int heads, int kv_heads, int dim) {
 }  // namespace
 
 // paths and symbols in the order shared_pipe, shared_pipe8, shared_flat, shared_flat8, tail16, tail8, merge
-void load_kernels(const std::vector<std::string>& paths, const std::vector<std::string>& symbols) {
-    auto& k = kernels();
-    if (!k.empty()) return;
+void load_kernels(int device, const std::vector<std::string>& paths, const std::vector<std::string>& symbols) {
+    TORCH_CHECK(device >= 0 && device < MAX_GPUS, "GPU ", device, ": the Mojo tree attention takes ", MAX_GPUS,
+                " at most");
     TORCH_CHECK(paths.size() == KERNELS && symbols.size() == KERNELS, "the Mojo tree attention has 7 kernels");
-    std::vector<hipFunction_t> loaded;
-    for (size_t i = 0; i < paths.size(); ++i) loaded.push_back(load_one(paths[i], symbols[i]));
-    k = loaded;
+    Kernels& k = g_kernels[device];
+    std::lock_guard<std::mutex> lock(g_load);
+    if (k.ready.load(std::memory_order_relaxed)) return;
+    OnDevice here(device);
+    for (size_t i = 0; i < paths.size(); ++i) k.fn[i] = load_one(paths[i], symbols[i]);
+    k.ready.store(true, std::memory_order_release);
 }
 
 // attention_rocm.cu's tree_shared: grid (KV heads, items), 65,535 items a launch.
@@ -83,8 +118,9 @@ void tree_shared(const at::Tensor& q, const at::Tensor& base, const at::Tensor& 
                  double scale, bool kv8) {
     int w = q.size(0), h = q.size(1);
     const int n = items.size(0);
+    const int device = device_of(q);
     TORCH_CHECK(tree_supported(h, hk, q.size(2)) && 1 <= cw && cw <= 8, "ROCm tree attention: head size 256");
-    hipFunction_t fn = kernel(pipe ? (kv8 ? SHARED_PIPE8 : SHARED_PIPE) : (kv8 ? SHARED_FLAT8 : SHARED_FLAT));
+    hipFunction_t fn = kernel(device, pipe ? (kv8 ? SHARED_PIPE8 : SHARED_PIPE) : (kv8 ? SHARED_FLAT8 : SHARED_FLAT));
     void* qp = q.data_ptr();
     void* bp = base.data_ptr();
     void* op = offs.data_ptr<int64_t>();
@@ -95,9 +131,10 @@ void tree_shared(const at::Tensor& q, const at::Tensor& base, const at::Tensor& 
     void* plp = pl.data_ptr<float>();
     int hkc = hk, g = h / hk;
     float sc = static_cast<float>(scale);
+    OnDevice here(device);
     for (int item0 = 0; item0 < n; item0 += 65535) {
         void* args[] = {&qp, &bp, &op, &sp, &ip, &pop, &pmp, &plp, &w, &h, &hkc, &g, &sc, &item0};
-        launch(fn, dim3(hk, std::min(65535, n - item0)), 32 * (cw + (pipe ? LOADERS : 0)), args);
+        launch(fn, device, dim3(hk, std::min(65535, n - item0)), 32 * (cw + (pipe ? LOADERS : 0)), args);
     }
 }
 
@@ -107,6 +144,7 @@ void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, 
                const at::Tensor& depths, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int tails, double scale,
                bool kv8) {
     int w = q.size(0), h = q.size(1), hk = kn.size(1);
+    const int device = device_of(q);
     TORCH_CHECK(tree_supported(h, hk, q.size(2)) && paths.size(1) == MAXD, "ROCm tree attention: head size 256");
     void* qp = q.data_ptr();
     void* knp = kn.data_ptr();
@@ -123,13 +161,16 @@ void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, 
     int vs = static_cast<int>(vn.stride(0)), g = h / hk;
     float sc = static_cast<float>(scale);
     void* args[] = {&qp, &knp, &vnp, &bp, &op, &sp, &rp, &pp, &dp, &pop, &pmp, &plp, &w, &vs, &h, &hk, &g, &sc};
-    if (w > 0) launch(kernel(kv8 ? TAIL8 : TAIL16), dim3(w, hk, tails), NL + 32, args);   // four loaders, a folder
+    OnDevice here(device);
+    // four loaders, a folder
+    if (w > 0) launch(kernel(device, kv8 ? TAIL8 : TAIL16), device, dim3(w, hk, tails), NL + 32, args);
 }
 
 // attention.py's _merge: po (chunks, W, H, 256), pm and pl (chunks, W, H) fp32 -> out (W, H, 256) bf16.
 void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl, at::Tensor& out,
                 const at::Tensor& streams, const at::Tensor& rows) {
     int w = out.size(0), h = out.size(1);
+    const int device = device_of(out);
     TORCH_CHECK(out.size(2) == D && po.size(3) == D && out.is_contiguous() && po.is_contiguous(),
                 "ROCm tree attention merge: head size 256, contiguous");
     void* pop = po.data_ptr<float>();
@@ -139,5 +180,8 @@ void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl
     void* sp = streams.data_ptr<int>();
     void* rp = rows.data_ptr<int>();
     void* args[] = {&pop, &pmp, &plp, &outp, &sp, &rp, &w, &h};
-    if (w > 0) launch(kernel(MERGE), dim3(w, (h + MERGE_HEADS - 1) / MERGE_HEADS), 64 * MERGE_HEADS, args);
+    OnDevice here(device);
+    if (w > 0) {
+        launch(kernel(device, MERGE), device, dim3(w, (h + MERGE_HEADS - 1) / MERGE_HEADS), 64 * MERGE_HEADS, args);
+    }
 }

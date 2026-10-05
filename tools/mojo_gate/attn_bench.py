@@ -61,7 +61,7 @@ def timed(g, calls):
 def use(kind):
     os.environ["TF_ROCM_TREE_KERNEL"] = kind
     shared._rocm_kernel.cache_clear()
-    return shared._mojo() if kind == "mojo" else shared._rocm()
+    return shared._mojo(torch.cuda.current_device()) if kind == "mojo" else shared._rocm()
 
 
 def main():
