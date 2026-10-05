@@ -1,8 +1,10 @@
-"""Mojo GPU kernels as HIP code objects: ``mojo build --emit object --target-accelerator <arch>`` embeds one complete
-AMDGPU ELF per instantiated kernel in the host object; they are carved out (as ``tools/mojo_gate/hipmodule/
-mojo2hsaco.py`` does) into ``<kernel>.hsaco`` files plus a ``manifest.json`` (symbol, kernarg layout, registers),
-which a C++ extension loads with ``hipModuleLoadData``. Built at first use and cached by the source's hash, the
-compiler's version and the GPU architecture, the way ``build.load`` caches the HIP extensions."""
+"""Mojo GPU kernels as HIP code objects or CUDA cubins: ``mojo build --emit object --target-accelerator <arch>``
+embeds one complete AMDGPU ELF per instantiated kernel in the host object; they are carved out (as
+``tools/mojo_gate/hipmodule/mojo2hsaco.py`` does) into ``<kernel>.hsaco`` files plus a ``manifest.json`` (symbol,
+kernarg layout, registers), which a C++ extension loads with ``hipModuleLoadData``. On NVIDIA the object embeds one
+PTX module per kernel instead; ``build_cubin`` carves those (as ``tools/mojo_gate/cumodule/mojo2cubin.py`` does) and
+runs ``ptxas`` on each, for ``cuModuleLoadData``. Built at first use and cached by the source's hash, the compiler's
+version and the GPU architecture, the way ``build.load`` caches the HIP extensions."""
 
 from __future__ import annotations
 
@@ -34,7 +36,8 @@ def mojo_binary() -> str:
         return named
     found = shutil.which("mojo") or str(Path(sys.executable).parent / "mojo")
     if not os.access(found, os.X_OK):
-        raise RuntimeError(f"TF_ROCM_LANE=mojo needs the Mojo compiler, and none was found: {INSTALL}")
+        raise RuntimeError(f"a Mojo kernel (TF_ROCM_LANE=mojo, TF_CUDA_PREFILL_GEMM=mojo) needs the Mojo compiler, "
+                           f"and none was found: {INSTALL}")
     return found
 
 
@@ -53,9 +56,20 @@ def _build_root() -> Path:
 def build_hsaco(source: Path, arch: str) -> tuple[Path, dict]:
     """``source``'s kernels as .hsaco files for ``arch``: (directory, manifest), built once per source hash."""
 
-    source = Path(source)
+    return _cached(Path(source), arch, b"", _build)
+
+
+def build_cubin(source: Path, arch: str) -> tuple[Path, dict]:
+    """``source``'s kernels as .cubin files for ``arch`` (``sm_121``): (directory, manifest), built once per source
+    hash, compiler and ptxas."""
+
+    return _cached(Path(source), arch, ptxas_version().encode(), _build_cubin)
+
+
+def _cached(source: Path, arch: str, extra: bytes, build) -> tuple[Path, dict]:
     text = source.read_bytes()
-    key = hashlib.sha256(b"\0".join([text, mojo_version().encode(), arch.encode(), str(CARVE_VERSION).encode()]))
+    parts = [text, mojo_version().encode(), arch.encode(), str(CARVE_VERSION).encode()] + ([extra] if extra else [])
+    key = hashlib.sha256(b"\0".join(parts))
     out = _build_root() / f"{source.stem}-{arch}-{key.hexdigest()[:16]}"
     manifest = out / "manifest.json"
     if manifest.is_file():
@@ -69,7 +83,7 @@ def build_hsaco(source: Path, arch: str) -> tuple[Path, dict]:
             if not manifest.is_file():
                 print(f"building Mojo kernels {source.name} for {arch} (first use; later starts reuse them)",
                       file=sys.stderr, flush=True)
-                _build(source, arch, out)
+                build(source, arch, out)
         finally:
             baton.release()
     else:
@@ -95,6 +109,98 @@ def _build(source: Path, arch: str, out: Path) -> None:
         if out.exists():
             shutil.rmtree(out)
         stage.rename(out)
+
+
+@lru_cache(maxsize=1)
+def ptxas() -> str:
+    """CUDA's ptxas: on PATH, else under the toolkit torch builds extensions with."""
+
+    found = shutil.which("ptxas")
+    if found:
+        return found
+    from torch.utils import cpp_extension
+
+    home = cpp_extension.CUDA_HOME or "/usr/local/cuda"
+    found = str(Path(home) / "bin" / "ptxas")
+    if not os.access(found, os.X_OK):
+        raise RuntimeError("the Mojo CUDA kernels need ptxas (the CUDA toolkit); none was found")
+    return found
+
+
+@lru_cache(maxsize=1)
+def ptxas_version() -> str:
+    out = subprocess.run([ptxas(), "--version"], capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def _build_cubin(source: Path, arch: str, out: Path) -> None:
+    with tempfile.TemporaryDirectory(dir=out.parent) as td:
+        obj = Path(td) / (source.stem + ".o")
+        r = subprocess.run([mojo_binary(), "build", "--emit", "object", "--target-accelerator", arch, str(source),
+                            "-o", str(obj)], capture_output=True, text=True, check=False)
+        if r.returncode:
+            raise RuntimeError(f"mojo build {source.name} failed:\n{r.stderr}")
+        stage = Path(td) / "out"
+        stage.mkdir()
+        manifest = carve_cubins(obj.read_bytes(), source, arch, stage)
+        if not manifest["kernels"]:
+            raise RuntimeError(f"mojo build {source.name}: no PTX kernels found (instantiate them from a host def)")
+        (stage / "manifest.json").write_text(json.dumps(manifest, indent=1))
+        if out.exists():
+            shutil.rmtree(out)
+        stage.rename(out)
+
+
+_PTX_SIZES = {"u8": 1, "s8": 1, "b8": 1, "u16": 2, "s16": 2, "b16": 2, "f16": 2, "u32": 4, "s32": 4, "b32": 4,
+              "f32": 4, "u64": 8, "s64": 8, "b64": 8, "f64": 8}
+
+
+def carve_cubins(blob: bytes, source: Path, arch: str, outdir: Path) -> dict:
+    """Write each embedded PTX module and its ptxas cubin to ``outdir`` and return the manifest (mojo2cubin.py's)."""
+
+    stem = source.stem
+    defs = re.findall(r"^def\s+(\w+)\s*[\[(]", source.read_text(), re.MULTILINE)
+    manifest: dict = {"arch": arch, "source": source.name, "kernels": []}
+    for m in re.finditer(rb"\.version [0-9.]+\n\.target sm_\w+\n", blob):
+        end = blob.find(b"\0", m.start())
+        ptx = blob[m.start():end if end >= 0 else len(blob)].decode()
+        target = re.search(r"\.target (\w+)", ptx).group(1)
+        for sym, params in ptx_entries(ptx):
+            cands = [d for d in defs if sym.startswith(f"{stem}_{d}_")]
+            short = max(cands, key=len) if cands else sym
+            if any(e["name"] == short for e in manifest["kernels"]):
+                raise RuntimeError(f"{source.name}: two kernels named {short} (one top-level def per instantiation)")
+            (outdir / f"{short}.ptx").write_text(ptx)
+            r = subprocess.run([ptxas(), f"-arch={target}", str(outdir / f"{short}.ptx"), "-o",
+                                str(outdir / f"{short}.cubin")], capture_output=True, text=True, check=False)
+            if r.returncode:
+                raise RuntimeError(f"ptxas {short} ({source.name}) failed:\n{r.stderr}")
+            manifest["kernels"].append({"name": short, "symbol": sym, "ptx": f"{short}.ptx", "cubin": f"{short}.cubin",
+                                        "target": target, "params": params})
+    return manifest
+
+
+def ptx_entries(ptx: str) -> list[tuple[str, list[dict]]]:
+    """[(symbol, [param])] for each ``.entry`` of a PTX module: index, type, offset, size, pointer or not."""
+
+    res = []
+    for m in re.finditer(r"\.entry\s+(\w+)\s*\((.*?)\)\s*\n\s*(?:\.\w+[^\n{]*\n\s*)*\{", ptx, re.S):
+        params, off = [], 0
+        for i, line in enumerate(x.strip().rstrip(",") for x in m.group(2).split("\n") if x.strip()):
+            pm = re.match(r"\.param\s+(.*?)\s+(\w+)(?:\[(\d+)\])?$", line)
+            if not pm:
+                raise ValueError(f"cannot parse PTX param: {line!r}")
+            attrs, _, count = pm.groups()
+            ty = re.search(r"\.(u8|s8|b8|u16|s16|b16|f16|u32|s32|b32|f32|u64|s64|b64|f64)\b", attrs).group(1)
+            al = re.search(r"\.align\s+(\d+)", attrs)
+            elem = _PTX_SIZES[ty]
+            size = elem * int(count) if count else elem
+            align = max(int(al.group(1)) if al and count else 1, elem)
+            off = (off + align - 1) // align * align
+            params.append({"index": i, "type": ty, "offset": off, "size": size, "ptr": ".ptr" in attrs})
+            off += size
+        res.append((m.group(1), params))
+    return res
 
 
 def carve(blob: bytes, source: Path, arch: str, outdir: Path) -> dict:

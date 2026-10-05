@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -27,6 +29,37 @@ def _ext():
                                                    str(here / "qmm_group.cu"), str(here / "qmm_prefill.cu"),
                                                    str(here / "qmm_prefill8.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=1)
+def _mojo():
+    """The Mojo prompt matmul's launcher with its kernels loaded: ``qmm_prefill.mojo`` built to cubins at first use
+    (cached by its hash), launched with cuLaunchKernel on torch's current stream."""
+
+    from tensorfold.cuda.build import load
+    from tensorfold.cuda.mojo import build_cubin
+
+    here = Path(__file__).parent
+    major, minor = torch.cuda.get_device_capability()
+    built, manifest = build_cubin(here / "qmm_prefill.mojo", f"sm_{major}{minor}")
+    ext = load(name="tensorfold_qmm_prefill_mojo_v1", sources=[str(here / "qmm_prefill_mojo.cpp"),
+                                                              str(here / "qmm_prefill_mojo.cu")],
+               extra_cuda_cflags=["-O3"], extra_ldflags=["-lcuda"], verbose=False)
+    k = {e["name"]: e for e in manifest["kernels"]}
+    ext.load_kernels(*(v for name in ("prefill_bf16", "prefill_f32")
+                       for v in (str(built / k[name]["cubin"]), k[name]["symbol"])))
+    return ext
+
+
+@lru_cache(maxsize=1)
+def prefill_kernel() -> str:
+    """The bf16 prompt matmul: ``cuda`` (``qmm_prefill.cu``, the default) or ``mojo`` (``qmm_prefill.mojo``: the same
+    kernel in Mojo, the same bits, built at first use by the ``mojo`` compiler); ``TF_CUDA_PREFILL_GEMM`` picks it."""
+
+    kind = os.environ.get("TF_CUDA_PREFILL_GEMM") or "cuda"
+    if kind not in ("cuda", "mojo"):
+        raise ValueError("TF_CUDA_PREFILL_GEMM: cuda or mojo")
+    return kind
 
 
 @lru_cache(maxsize=None)
@@ -211,8 +244,10 @@ def prompt_tile(m: int, n: int) -> int:
 
 
 def prefill_matmul(x: torch.Tensor, q: Q4, *, f32: bool = False, tile: int = 0,
-                   out: torch.Tensor | None = None) -> torch.Tensor:
-    """Prefill: weights rounded once to bf16, one fp32 chain over K; any chunking gives the same bits, not decode's."""
+                   out: torch.Tensor | None = None, mojo: bool | None = None) -> torch.Tensor:
+    """Prefill: weights rounded once to bf16, one fp32 chain over K; any chunking gives the same bits, not decode's.
+    ``mojo`` (default: ``TF_CUDA_PREFILL_GEMM``) runs 64-input groups on the Mojo kernel, whose tile is fixed (tiles
+    never change bits, so ``tile`` is then ignored)."""
 
     if x.dtype != torch.bfloat16 or x.dim() != 2 or x.shape[1] != q.k:
         raise ValueError(f"prefill_matmul: x must be (M, {q.k}) bf16")
@@ -220,6 +255,9 @@ def prefill_matmul(x: torch.Tensor, q: Q4, *, f32: bool = False, tile: int = 0,
         x = x.clone(memory_format=torch.contiguous_format)
     if out is None:
         out = torch.empty((x.shape[0], q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+    if q.gs == 64 and (prefill_kernel() == "mojo" if mojo is None else mojo):
+        _mojo().prefill(x, q.weight, q.scales, q.biases, out, q.n)
+        return out
     _ext().qmm_prefill(x, q.weight, q.scales, q.biases, out, q.n, q.gs, f32, tile)
     return out
 
