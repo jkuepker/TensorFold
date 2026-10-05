@@ -189,23 +189,52 @@ def _rocm():
 
 
 @lru_cache(maxsize=1)
+def _mojo_ext():
+    from tensorfold.cuda.build import load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_qmm_rocm_mojo_v3", sources=[str(here / "qmm_rocm_mojo.cpp"),
+                                                             str(here / "qmm_rocm_mojo.cu")],
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=None)
+def _mojo(device: int):
+    """The Mojo lane's launcher with its kernels loaded on GPU ``device``: ``qmm_rocm.mojo`` built to code objects at
+    first use (cached by its hash and the GPU's architecture, so same-architecture cards share them), launched with
+    hipModuleLaunchKernel on torch's current stream of the tensors' GPU."""
+
+    from tensorfold.cuda.build import hip_arch
+    from tensorfold.cuda.mojo import arg_sizes, build_hsaco, kernels
+
+    built, manifest = build_hsaco(Path(__file__).parent / "qmm_rocm.mojo", hip_arch(device))
+    ext = _mojo_ext()
+    ext.load_kernels(device, *(v for e in kernels(manifest, ("wmma_mt1", "wmma_mt2"))
+                               for v in (str(built / e["hsaco"]), e["symbol"], arg_sizes(e))))
+    return ext
+
+
+@lru_cache(maxsize=1)
 def lane_kernel() -> str:
     """The ROCm lane matmul: ``qmm_rocm.cu``'s ``wmma`` (the default on gfx12: 20-28% under Triton at 12 rows on the
     27B's large projections, half its per-call cost on small ones), its ``dot2`` (bf16 dot instructions: fastest at one
-    row, compute bound at twelve), or ``triton`` (the default on other AMD GPUs, where ``qmm_rocm.cu`` does not build);
-    ``TF_ROCM_LANE`` picks it. Their bits differ, so a process uses one for every lane call."""
+    row, compute bound at twelve), ``mojo`` (``qmm_rocm.mojo``: the same WMMA kernel in Mojo, the same bits, built at
+    first use by the ``mojo`` compiler), or ``triton`` (the default on other AMD GPUs, where ``qmm_rocm.cu`` does not
+    build); ``TF_ROCM_LANE`` picks it. Their bits differ (save wmma and mojo), so a process uses one for every lane
+    call."""
 
     from tensorfold.cuda.build import wmma
 
     kind = os.environ.get("TF_ROCM_LANE") or ""
-    if kind not in ("", "triton", "dot2", "wmma"):
-        raise ValueError("TF_ROCM_LANE: triton, dot2 or wmma")
+    if kind not in ("", "triton", "dot2", "wmma", "mojo"):
+        raise ValueError("TF_ROCM_LANE: triton, dot2, wmma or mojo")
     return (kind or "wmma") if wmma("TF_ROCM_LANE") else "triton"
 
 
 def gemv(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, n: int,
-         xs: torch.Tensor | None = None, *, f32: bool = False, wmma: bool = False) -> torch.Tensor:
-    """The HIP decode matmul: rows in 16-row passes, K slices added in order."""
+         xs: torch.Tensor | None = None, *, f32: bool = False, wmma: bool = False, mojo: bool = False) -> torch.Tensor:
+    """The HIP decode matmul: rows in 16-row passes, K slices added in order. ``mojo``: the WMMA kernel's Mojo port
+    (``wmma`` implied), the same bits."""
 
     kg = words.shape[1]
     x = x.contiguous()
@@ -214,13 +243,17 @@ def gemv(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: tor
     m = x.shape[0]
     if xs is None:
         xs = group_sums(x)
-    ext = _rocm()
+    wmma = wmma or mojo
     fill = wmma_fill()
-    slices = _slices(kg, n, wmma, fill)
+    slices = _slices(kg, n, "mojo" if mojo else "wmma" if wmma else "dot2", fill)
     out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     part = (torch.empty((slices * min(m, 32 if wmma else 16) * n,), dtype=torch.float32, device=x.device)
             if slices > 1 or f32 else out)                 # unread when one slice writes its output directly
-    ext.gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, wmma, fill, _counts(x.device, n))
+    if mojo:
+        _mojo(x.get_device()).gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, fill,
+                                          _counts(x.device, n))
+    else:
+        _rocm().gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, wmma, fill, _counts(x.device, n))
     return out
 
 
@@ -248,9 +281,14 @@ def wmma_fill() -> int:
 
 
 @lru_cache(maxsize=None)
-def _slices(kg: int, n: int, wmma: bool, fill: int) -> int:
+def _slices(kg: int, n: int, kind: str, fill: int) -> int:
+    """K slices of a (kg groups, n outputs) weight for lane ``kind`` (``wmma``, ``mojo`` or ``dot2``): the Mojo lane
+    asks its own launcher (the same schedule), so it never builds ``qmm_rocm.cu``."""
+
+    if kind == "mojo":
+        return _mojo_ext().wmma_slices(kg, n, fill)
     ext = _rocm()
-    return ext.wmma_slices(kg, n, fill) if wmma else ext.gemv_slices(kg)
+    return ext.wmma_slices(kg, n, fill) if kind == "wmma" else ext.gemv_slices(kg)
 
 
 def reload_settings() -> None:
@@ -270,7 +308,7 @@ def matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: t
         raise ValueError(f"lane matmul: x must be (M, {k}) bf16")
     kind = lane_kernel()
     if kind != "triton":
-        return gemv(x, words, scales, biases, n, xs, f32=f32, wmma=kind == "wmma")
+        return gemv(x, words, scales, biases, n, xs, f32=f32, wmma=kind == "wmma", mojo=kind == "mojo")
     x = x.contiguous()
     m = x.shape[0]
     if xs is None:

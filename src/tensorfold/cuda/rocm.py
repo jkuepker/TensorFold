@@ -45,10 +45,10 @@ def use_pip_sdk() -> None:
         os.environ["PATH"] = os.path.join(root, "bin") + os.pathsep + os.environ.get("PATH", "")
 
 
-def offload_arch() -> str:
-    """The present AMD GPU's target, e.g. ``gfx1151`` (feature suffixes such as ``:xnack-`` dropped)."""
+def offload_arch(device: int = 0) -> str:
+    """GPU ``device``'s target, e.g. ``gfx1151`` (feature suffixes such as ``:xnack-`` dropped)."""
 
-    return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    return torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
 
 
 __all__ = ["HIP", "NVCC_TO_HIP", "hip_flags", "offload_arch", "use_pip_sdk"]
