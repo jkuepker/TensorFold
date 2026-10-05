@@ -196,10 +196,22 @@ def put_v16(t: SPtr, i: UInt32, x: SIMD[U32, 8]):
         t16[Int(VT + (col + UInt32(2 * u + 1)) * 16 + key)] = UInt16(x[u] >> 16)
 
 
+# The cache from key ``key0`` on (``stride``: bf16 elements a key, bytes for packed rows). The 64-bit product is
+# taken once a tile on wave-uniform values, so the loads' 32-bit offsets stay within a tile's rows however long the
+# cache (key * stride in 32 bits wraps past 4 GiB: about 2M keys at 4 KV heads).
+@always_inline
+def from_key[KV8: Bool](c: U16Ptr, key0: UInt32, stride: UInt32) -> U16Ptr:
+    comptime if KV8:
+        return (c.bitcast[UInt8]() + Int(key0) * Int(stride)).bitcast[UInt16]()
+    else:
+        return c + Int(key0) * Int(stride)
+
+
 # The pieces of tile ``key0`` a thread loads: bf16 (KV8 False) 8 values a piece, packed 16 bytes and the row's
 # exponent; the first ``M`` of N pieces of K and as many of V, piece j at ``i0 + j * step``.
 # BOUND (prompt keys): keys past ``last`` read key ``last``'s row instead of attention_rocm.cu's zeros. Their scores
 # are masked to -inf and their probabilities are 0, so a finite row adds exact zeros to every sum: the same bits.
+# A tile holds a key at or before ``last``, so ``last - key0`` never wraps.
 @always_inline
 def fetch_c[KV8: Bool, N: Int, M: Int, BOUND: Bool = False](
     mut kr: SIMD[U32, 4 * N],
@@ -214,21 +226,23 @@ def fetch_c[KV8: Bool, N: Int, M: Int, BOUND: Bool = False](
     step: UInt32,
     last: UInt32 = 0,
 ):
+    var kt = from_key[KV8](kc, key0, stride)
+    var vt = from_key[KV8](vc, key0, stride)
     comptime for j in range(M):
         var i = i0 + UInt32(j) * step
-        var kk: UInt32
+        var kk: UInt32  # keys from key0
         var vk: UInt32
         comptime if KV8:
-            kk = key0 + (i >> 4)
+            kk = i >> 4
         else:
-            kk = key0 + (i >> 5)
-        vk = key0 + (i & 15)
+            kk = i >> 5
+        vk = i & 15
         comptime if BOUND:
-            kk = min(kk, last)
-            vk = min(vk, last)
+            kk = min(kk, last - key0)
+            vk = min(vk, last - key0)
         comptime if KV8:
-            var kb = kc.bitcast[UInt8]()
-            var vb = vc.bitcast[UInt8]()
+            var kb = kt.bitcast[UInt8]()
+            var vb = vt.bitcast[UInt8]()
             var krow = kk * stride
             var vrow = vk * stride
             kr = kr.insert[offset=4 * j](ld4b[KV_NT](kb, krow + (i & 15) * 16))
@@ -236,11 +250,11 @@ def fetch_c[KV8: Bool, N: Int, M: Int, BOUND: Bool = False](
             vr = vr.insert[offset=4 * j](ld4b[KV_NT](vb, vrow + (i >> 4) * 16))
             ve[j] = exponent(vb, vrow + D)
         else:
-            kr = kr.insert[offset=4 * j](ld4[KV_NT](kc, kk * stride + (i & 31) * 8))
+            kr = kr.insert[offset=4 * j](ld4[KV_NT](kt, kk * stride + (i & 31) * 8))
             comptime if V_TR:
-                vr = vr.insert[offset=4 * j](ld4_tr(vc, vk * stride + (i >> 4) * 8))
+                vr = vr.insert[offset=4 * j](ld4_tr(vt, vk * stride + (i >> 4) * 8))
             else:
-                vr = vr.insert[offset=4 * j](ld4[KV_NT](vc, vk * stride + (i >> 4) * 8))
+                vr = vr.insert[offset=4 * j](ld4[KV_NT](vt, vk * stride + (i >> 4) * 8))
 
 
 @always_inline
@@ -674,13 +688,21 @@ def tail_body[KV8: Bool](
     var nstride = UInt32(hk_count) * D
     var vstride = UInt32(vs)
     if not folds:  # four loader waves: tile kt + 1 into the other buffer while tile kt folds
+        # keys counted from the tail's first chunk (``from_key``: the committed keys a tail reads sit in that chunk,
+        # so their 32-bit offsets never wrap); key - p and end - p, all a piece compares, are the same counted so
+        var first = p // CH * CH
+        var kf = from_key[KV8](kc, first, stride)
+        var vf = from_key[KV8](vc, first, stride)
+        var pf = p - first
+        var ef = end - first
+        var k0f = key0 - first
         if nt > 0:
-            tail_tile[KV8](t, kc, vc, kn, vn, path, stride, nstride, vstride, p, end, hk, key0, tid)
+            tail_tile[KV8](t, kf, vf, kn, vn, path, stride, nstride, vstride, pf, ef, hk, k0f, tid)
         barrier()
         for kt in range(Int(nt)):
             if UInt32(kt) + 1 < nt:
-                tail_tile[KV8](t1 if kt % 2 == 0 else t, kc, vc, kn, vn, path, stride, nstride, vstride, p, end, hk,
-                               key0 + 16 * UInt32(kt + 1), tid)
+                tail_tile[KV8](t1 if kt % 2 == 0 else t, kf, vf, kn, vn, path, stride, nstride, vstride, pf, ef, hk,
+                               k0f + 16 * UInt32(kt + 1), tid)
             barrier()
         return
     var qb = query(q, node * UInt32(h) + hk * g + c, c < g, half)

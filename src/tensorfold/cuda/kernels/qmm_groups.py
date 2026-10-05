@@ -478,6 +478,14 @@ def _prefill_mojo(device: int):
     return ext
 
 
+def _mojo_fits(*operands) -> bool:
+    """Whether the Mojo prompt GEMM's 32-bit offsets reach every byte of its operands (tensors, or (rows, columns,
+    bytes) for the output). Past 4 GiB the Triton kernel runs instead: the same bits, so only speed changes."""
+
+    sizes = [t.numel() * t.element_size() if isinstance(t, torch.Tensor) else t[0] * t[1] * t[2] for t in operands]
+    return max(sizes) < 2**32
+
+
 def prefill_matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, n: int, *,
                    f32: bool = False) -> torch.Tensor:
     """Prompt rows times the tiled weight: bf16 weights once, then a fixed-tile GEMM; any chunking, same bits."""
@@ -489,7 +497,7 @@ def prefill_matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, b
     x = x.contiguous()
     m = x.shape[0]
     w = dequantize(words, scales, biases, n)
-    if prefill_gemm() == "mojo":
+    if prefill_gemm() == "mojo" and _mojo_fits(x, w, (m, n, 4)):
         if x.data_ptr() % 16:
             x = x.clone()                                # rows are read in 16-byte pieces
         out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
@@ -602,10 +610,11 @@ def prefill_matmul8(x: tuple[torch.Tensor, torch.Tensor, torch.Tensor], words: t
     m = x8.shape[0]
     w8 = _buffer(words.device, n * k).view(n, k)
     _nibbles8[(kg, triton.cdiv(n, 64))](words, w8, N=n, K=k, BLOCK_N=64, num_warps=4)
-    if prefill8_gemm() == "mojo":
+    if prefill8_gemm() == "mojo" and _mojo_fits(x8, w8, xs, scales, biases, (m, n, 4)):
         out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)
         x8 = x8 if x8.data_ptr() % 16 == 0 and x8.is_contiguous() else x8.contiguous().clone()
-        _prefill_mojo(x8.get_device()).gemm8(x8, xs.contiguous(), a.contiguous(), w8, scales, biases, out, prefill8_mojo_tile())
+        _prefill_mojo(x8.get_device()).gemm8(x8, xs.contiguous(), a.contiguous(), w8, scales, biases, out,
+                                             prefill8_mojo_tile())
         return out
     bm, bn, warps, stages = prefill8_config()
     out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)

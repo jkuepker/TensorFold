@@ -184,6 +184,33 @@ def test_mojo_reads_no_key_past_an_exact_cache(monkeypatch, w, p, kv8):
     torch.cuda.synchronize()
 
 
+@pytest.mark.parametrize("kv8", [False, True])
+def test_mojo_reads_keys_past_4gib(monkeypatch, kv8):
+    """Committed keys past 4 GiB of one stream's cache, in shared and tail chunks: a 32-bit key * stride offset would
+    wrap to the cache's start there."""
+
+    from tensorfold.cuda.kernels import kv8 as packing
+
+    row = packing.ROW8 if kv8 else 2 * D
+    p, w, h = 2**32 // row + 700, 3, 8
+    if torch.cuda.mem_get_info()[0] < (p + 5) * row + 2 * 2**30:
+        pytest.skip("needs a cache past 4 GiB")
+    gen = torch.Generator(device="cuda").manual_seed(43)
+    if kv8:
+        cache = torch.empty((p + 5, 1, row), dtype=torch.uint8, device="cuda").random_(0, 0x7F, generator=gen)
+        cache[:, :, D] = cache[:, :, D] % 5 + 254             # exponents -2..2 as int8 bytes; e4m3 codes below NaN
+    else:
+        cache = torch.empty((p + 5, 1, D), dtype=torch.bfloat16, device="cuda").normal_(generator=gen)
+    q = torch.randn((w, h, D), generator=gen, device="cuda").bfloat16()
+    kn = torch.randn((w, 1, D), generator=gen, device="cuda").bfloat16()
+    vn = torch.randn((w, 1, D), generator=gen, device="cuda").bfloat16()
+    if kv8:
+        kn, vn = (packing.unpack(packing.reference_pack(t)) for t in (kn, vn))
+    _same(monkeypatch, (q, kn, vn, cache, cache), [[-1, 0, 1]], [p], kv8=kv8)
+    del cache
+    torch.cuda.empty_cache()
+
+
 def test_mojo_tree_attention_needs_no_hip_extension(monkeypatch):
     """TF_ROCM_TREE_KERNEL=mojo routes and runs without attention_rocm.cu."""
 

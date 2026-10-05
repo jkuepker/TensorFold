@@ -80,6 +80,35 @@ def test_mojo_prompt_attention_is_routed_by_tf_rocm_attn_kernel(monkeypatch):
     assert torch.equal(outs[0], outs[1])
 
 
+def _past_4gib(rows: int, packed: bool, seed: int) -> torch.Tensor:
+    """A one-KV-head cache of ``rows`` keys (used as keys and values: one buffer past 4 GiB), filled in place."""
+
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    if not packed:
+        return torch.empty((rows, 1, D), dtype=torch.bfloat16, device="cuda").normal_(generator=gen)
+    cache = torch.empty((rows, 1, kv8.ROW8), dtype=torch.uint8, device="cuda").random_(0, 0x7F, generator=gen)
+    cache[:, :, D] = cache[:, :, D] % 5 + 254                 # exponents -2..2 as int8 bytes; e4m3 codes below NaN
+    return cache
+
+
+@pytest.mark.parametrize("packed", [False, True], ids=["bf16", "fp8"])
+def test_mojo_prompt_attention_reads_keys_past_4gib(packed):
+    """Keys past 4 GiB of one cache: a 32-bit key * stride offset would wrap to the cache's start there."""
+
+    row = kv8.ROW8 if packed else 2 * D
+    p0, w = 2**32 // row + 1000, 40
+    if torch.cuda.mem_get_info()[0] < (p0 + w) * row + 2 * 2**30:
+        pytest.skip("needs a cache past 4 GiB")
+    cache = _past_4gib(p0 + w, packed, 41)
+    gen = torch.Generator(device="cuda").manual_seed(42)
+    q = (torch.randn(w, 4, D, generator=gen, device="cuda") * 1.5).bfloat16()
+    for rb, pipe in ((1, True), (2, False)):
+        ref, got = _both(q, cache, cache, p0, rb, pipe)
+        assert torch.equal(ref.view(torch.int16), got.view(torch.int16)), (rb, pipe)
+    del cache
+    torch.cuda.empty_cache()
+
+
 def test_mojo_prompt_attention_needs_no_hip_extension(monkeypatch):
     """TF_ROCM_ATTN_KERNEL=mojo routes and runs without attention_rocm.cu."""
 
