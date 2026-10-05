@@ -65,7 +65,7 @@ struct OnDevice {
     }
 };
 
-int device_of(const at::Tensor& t) {
+int gpu_of(const at::Tensor& t) {
     const int device = t.get_device();
     TORCH_CHECK(device >= 0 && device < MAX_GPUS, "the Mojo attention takes tensors on a GPU");
     return device;
@@ -123,7 +123,7 @@ void tree_shared(const at::Tensor& q, const at::Tensor& base, const at::Tensor& 
                  double scale, bool kv8) {
     int w = q.size(0), h = q.size(1);
     const int n = items.size(0);
-    const int device = device_of(q);
+    const int device = gpu_of(q);
     TORCH_CHECK(tree_supported(h, hk, q.size(2)) && 1 <= cw && cw <= 8, "ROCm tree attention: head size 256");
     hipFunction_t fn = kernel(device, pipe ? (kv8 ? SHARED_PIPE8 : SHARED_PIPE) : (kv8 ? SHARED_FLAT8 : SHARED_FLAT));
     void* qp = q.data_ptr();
@@ -149,7 +149,7 @@ void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, 
                const at::Tensor& depths, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int tails, double scale,
                bool kv8) {
     int w = q.size(0), h = q.size(1), hk = kn.size(1);
-    const int device = device_of(q);
+    const int device = gpu_of(q);
     TORCH_CHECK(tree_supported(h, hk, q.size(2)) && paths.size(1) == MAXD, "ROCm tree attention: head size 256");
     void* qp = q.data_ptr();
     void* knp = kn.data_ptr();
@@ -175,7 +175,7 @@ void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, 
 void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl, at::Tensor& out,
                 const at::Tensor& streams, const at::Tensor& rows) {
     int w = out.size(0), h = out.size(1);
-    const int device = device_of(out);
+    const int device = gpu_of(out);
     TORCH_CHECK(out.size(2) == D && po.size(3) == D && out.is_contiguous() && po.is_contiguous(),
                 "ROCm tree attention merge: head size 256, contiguous");
     void* pop = po.data_ptr<float>();
@@ -202,7 +202,7 @@ bool prompt_supported(int heads, int kv_heads, int dim) {   // attention_rocm.cu
 void prompt_attention(const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache, at::Tensor& out,
                       int p0, double scale, int rb, bool pipe) {
     int w = q.size(0), h = q.size(1), hk = k_cache.size(1);
-    const int device = device_of(q);
+    const int device = gpu_of(q);
     const bool kv8 = k_cache.scalar_type() == at::kByte;
     TORCH_CHECK(prompt_supported(h, hk, q.size(2)) && (rb == 1 || rb == 2) && k_cache.size(2) == (kv8 ? ROW8 : D) &&
                 v_cache.scalar_type() == k_cache.scalar_type(),
