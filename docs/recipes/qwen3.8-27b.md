@@ -294,14 +294,15 @@ loader waves or not). With Triton 3.6 on gfx1201 some GEMM tiles give wrong sums
 `tests/cuda/test_qwen27_prefill.py` guards both prompt GEMMs at the model's shapes.
 
 Kernels in Mojo (opt-in, gfx12 only, the Mojo compiler installed: [RUNBOOK](../../RUNBOOK.md#amd-mojo)), each giving
-the bits of the kernel it replaces: `TF_ROCM_LANE=mojo` (the WMMA decode matmul), `TF_ROCM_TREE_KERNEL=mojo` (tree
-attention) and `TF_ROCM_ATTN_KERNEL=mojo` (prompt attention) the HIP kernels'; `TF_ROCM_PREFILL_GEMM=mojo` (the bf16
-prompt GEMM) and `TF_ROCM_PREFILL8_GEMM=mojo` (the FP8 one, `--prefill-fp8`) Triton's. On an R9700 the five together
-fill prompts of the 27B 12.5-13.6% faster at 4k-30k tokens with the same replies, mostly from the bf16 prompt GEMM
-(1.13-1.46x Triton's) and prompt attention (1.05-1.11x HIP's); decode runs about as fast as on the HIP kernels. The
-FP8 prompt GEMM measured 1-24% slower than Triton's, which is why it has a flag of its own; leave it at `triton`
-unless you are measuring it. `TF_ROCM_PREFILL_TILE` and `TF_ROCM_PREFILL8_TILE` pick the Mojo prompt GEMMs' tiles
-(scheduling only). Asking for `mojo` off gfx12 is refused, and so is a value a flag does not take.
+the bits of the kernel it replaces (the tree merge at 16 query heads a KV head excepted: 1-3 ulp on a few values):
+`TF_ROCM_LANE=mojo` (the WMMA decode matmul), `TF_ROCM_TREE_KERNEL=mojo` (tree attention) and
+`TF_ROCM_ATTN_KERNEL=mojo` (prompt attention) the HIP kernels'; `TF_ROCM_PREFILL_GEMM=mojo` (the bf16 prompt GEMM) and
+`TF_ROCM_PREFILL8_GEMM=mojo` (the FP8 one, `--prefill-fp8`) Triton's. On an R9700 the five together fill prompts of
+the 27B 12.5-13.6% faster at 4k-30k tokens with the same replies, mostly from the bf16 prompt GEMM (1.13-1.46x
+Triton's) and prompt attention (1.05-1.11x HIP's); decode runs about as fast as on the HIP kernels. The FP8 prompt
+GEMM measured 1-24% slower than Triton's, which is why it has a flag of its own; leave it at `triton` unless you are
+measuring it. `TF_ROCM_PREFILL_TILE` and `TF_ROCM_PREFILL8_TILE` pick the Mojo prompt GEMMs' tiles (scheduling only).
+Asking for `mojo` off gfx12 is refused, and so is a value a flag does not take.
 
 `--kv-dtype fp8` (opt-in) stores the attention layers' keys and values packed: per token and KV head, the 256
 values as e4m3 codes of x * 2^-e, e the smallest exponent that puts the row's largest magnitude at or under 448, then e
