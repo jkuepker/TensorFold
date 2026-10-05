@@ -109,6 +109,27 @@ def test_mojo_prompt_attention_reads_keys_past_4gib(packed):
     torch.cuda.empty_cache()
 
 
+def test_mojo_prompt_attention_runs_on_the_current_stream():
+    """Launched on torch's current stream: queries written on a busy side stream just before are the ones read."""
+
+    gen = torch.Generator(device="cuda").manual_seed(6)
+    k, v = _caches(gen, 2341 + 4096, 4, False)
+    q = (torch.randn(2341, 24, D, generator=gen, device="cuda") * 1.5).bfloat16()
+    want = torch.empty_like(q)
+    prefill_attention._rocm().attention(q, k, v, want, 4096, D ** -0.5, 2, True)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        big = torch.randn(4096, 4096, device="cuda")
+        for _ in range(4):
+            big = big @ big                             # keeps the stream busy before q is written on it
+        q2 = q * 1.0
+        got = torch.empty_like(q2)
+        tree._mojo(q2.get_device()).attention(q2, k, v, got, 4096, D ** -0.5, 2, True)
+    side.synchronize()
+    assert torch.equal(want, got)
+
+
 def test_mojo_prompt_attention_needs_no_hip_extension(monkeypatch):
     """TF_ROCM_ATTN_KERNEL=mojo routes and runs without attention_rocm.cu."""
 

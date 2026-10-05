@@ -175,13 +175,62 @@ def test_mojo_gives_the_hip_bits_on_the_27b_geometry(monkeypatch, p, kv8):
 @pytest.mark.parametrize("kv8", [False, True])
 @pytest.mark.parametrize("w,p", [(1, 512), (1, 513), (3, 1024), (32, 512)])
 def test_mojo_reads_no_key_past_an_exact_cache(monkeypatch, w, p, kv8):
-    """Caches of exactly ``p`` rows (test_attention's serial rows): a read past the last chunk would fault here."""
+    """Caches of exactly ``p`` rows (test_attention's serial rows) in a larger buffer whose rows past ``p`` are NaN
+    (NaN e4m3 codes for packed rows): a key or value read past the last committed one would reach a row's output."""
 
-    q, kn, vn, kc, vc = _inputs(w, p)
-    kc, vc = (torch.cat((x[:p], x[:0])).contiguous() for x in (kc, vc))
-    inputs = (q, kn, vn, kc, vc)
-    _same(monkeypatch, _fp8(inputs) if kv8 else inputs, [[-1] + list(range(w - 1))], [p], kv8=kv8)
-    torch.cuda.synchronize()
+    inputs = _inputs(w, p)
+    if kv8:
+        inputs = _fp8(inputs)
+    caches = []
+    for x in inputs[3:]:
+        big = torch.empty((p + 64, *x.shape[1:]), dtype=x.dtype, device=x.device)
+        big[:p] = x[:p]
+        if x.dtype == torch.uint8:
+            big[p:] = 0x7F
+        else:
+            big[p:] = float("nan")
+        caches.append(big[:p])
+    q, kn, vn = inputs[:3]
+    _same(monkeypatch, (q, kn, vn, *caches), [[-1] + list(range(w - 1))], [p], kv8=kv8)
+    plan = shared.plan([[-1] + list(range(w - 1))], [p], H27 // HK27, "cuda")
+    rows = _attend(monkeypatch, "mojo", q, kn, vn, _offs([caches]), plan, 1 / 16, kv8).view(torch.bfloat16)
+    assert rows.isfinite().all()
+
+
+@pytest.mark.parametrize("h,hk", [(16, 1), (4, 4), (40, 8)], ids=["g16", "g1", "g5"])
+@pytest.mark.parametrize("kv8", [False, True])
+def test_mojo_gives_the_hip_bits_at_any_head_grouping(monkeypatch, h, hk, kv8):
+    """Query heads a KV head beside the 27B's 6: 16 (a full query tile), 1, and 5 (not a divisor of 16)."""
+
+    for w, p in ((9, 513), (12, 1300), (1, 3000), (16, 600)):
+        inputs = _inputs(w, p, h=h, hk=hk)
+        _same(monkeypatch, _fp8(inputs) if kv8 else inputs, [_tree(w)], [p], kv8=kv8)
+        chain = [-1] + list(range(w - 1))
+        _same(monkeypatch, _fp8(inputs) if kv8 else inputs, [chain], [p], kv8=kv8)
+
+
+@pytest.mark.parametrize("kv8", [False, True])
+def test_mojo_attention_runs_on_the_current_stream(monkeypatch, kv8):
+    """Launched on torch's current stream: queries written on a busy side stream just before are the ones read."""
+
+    w, p = 12, 20501
+    inputs = _inputs(w, p)
+    if kv8:
+        inputs = _fp8(inputs)
+    q, kn, vn = inputs[:3]
+    plan = shared.plan([[-1] + list(range(w - 1))], [p], H27 // HK27, "cuda")
+    offs = _offs([inputs[3:]])
+    want = _attend(monkeypatch, "wmma", q, kn, vn, offs, plan, 1 / 16, kv8)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        big = torch.randn(4096, 4096, device="cuda")
+        for _ in range(4):
+            big = big @ big                             # keeps the stream busy before q is written on it
+        q2 = q * 1.0
+        got = _attend(monkeypatch, "mojo", q2, kn, vn, offs, plan, 1 / 16, kv8)
+    side.synchronize()
+    assert torch.equal(want, got)
 
 
 @pytest.mark.parametrize("kv8", [False, True])

@@ -99,14 +99,21 @@ def _build_root() -> Path:
     return Path(os.environ.get("TORCH_EXTENSIONS_DIR") or cpp_extension.get_default_build_root()) / "mojo"
 
 
+def cache_dir(source: Path, arch: str) -> Path:
+    """Where ``source``'s build for ``arch`` lives: keyed by its text, the compiler's version, arch, CARVE_VERSION."""
+
+    source = Path(source)
+    key = hashlib.sha256(b"\0".join([source.read_bytes(), mojo_version().encode(), arch.encode(),
+                                      str(CARVE_VERSION).encode()]))
+    return _build_root() / f"{source.stem}-{arch}-{key.hexdigest()[:16]}"
+
+
 def build_hsaco(source: Path, arch: str) -> tuple[Path, dict]:
     """``source``'s kernels as .hsaco files for ``arch``: (directory, manifest), built once per source hash."""
 
     source = Path(source)
     check_version()
-    text = source.read_bytes()
-    key = hashlib.sha256(b"\0".join([text, mojo_version().encode(), arch.encode(), str(CARVE_VERSION).encode()]))
-    out = _build_root() / f"{source.stem}-{arch}-{key.hexdigest()[:16]}"
+    out = cache_dir(source, arch)
     manifest = out / "manifest.json"
     if manifest.is_file():
         return out, json.loads(manifest.read_text())
