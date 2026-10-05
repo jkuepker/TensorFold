@@ -137,3 +137,8 @@ Tests: test_attention_rocm_mojo.py 43 passed; with `TF_ROCM_LANE=mojo TF_ROCM_TR
 GLM draft ring and Qwen27 GPU tests plus test_cuda_build/test_cuda_kv8 give 399 passed, 4 failed, 3 errors, the same
 as with `TF_ROCM_TREE_KERNEL=wmma` (test_glm_draft_ring's flat-buffer bits and the GLM experts extension not
 building in this image).
+
+## Phase 4: DGX Spark (GB10, sm_121, aarch64)
+
+Toolchain and launch-path gate on spark2: see `spark/README.md` (results table) and `cumodule/` (PTX/cubin carve-out
+and the `cuModuleLoadData` + `cuLaunchKernel` launch route, the NVIDIA twin of `hipmodule/`).

@@ -1,0 +1,67 @@
+Mojo 1.1.0 (8189361e)
+max ? torch 2.13.0a0+9186a08b2c.nv26.07 cuda True NVIDIA GB10 (12, 1)
+== check 2: vecadd
+device: NVIDIA GB10 api: cuda
+mismatches: 0
+PASS
+== check 3: launch path
+argprobe argprobe.ptx argprobe.cubin [(0, 8, 'u64'), (8, 4, 'u32'), (16, 8, 'u64'), (24, 4, 'u32'), (32, 8, 'u64')]
+scale_add scale_add.ptx scale_add.cubin [(0, 8, 'u64'), (8, 8, 'u64'), (16, 8, 'u64'), (24, 4, 'u32')]
+device NVIDIA GB10 sm_121 torch 2.13.0a0+9186a08b2c.nv26.07
+  load scale_add.cubin: 0.2 ms
+  load scale_add.ptx: 0.1 ms
+  load argprobe.cubin: 0.0 ms
+scale_add cubin exact vs torch: PASS (n=1..1M, partial blocks)
+scale_add ptx (driver JIT) exact vs torch: PASS (n=1..1M, partial blocks)
+argprobe (packed-buffer form, manifest offsets) -> [11, 22, 33, 44] PASS
+non-default stream: PASS (consumed output of 5 matmuls + a scale on s; event span 10.95 ms covers matmul + launch)
+mojo cuModule    enqueue median   2.88 us  p99   3.30 us   back-to-back   2.73 us/call
+nvcc <<<>>>      enqueue median   2.93 us  p99   3.33 us   back-to-back   2.86 us/call
+torch.add        enqueue median   2.69 us  p99   2.85 us   back-to-back   2.72 us/call
+mojo cuModule    enqueue median   2.74 us  p99   3.04 us   back-to-back   2.75 us/call
+nvcc <<<>>>      enqueue median   2.83 us  p99   3.26 us   back-to-back   2.80 us/call
+torch.add        enqueue median   2.69 us  p99   2.91 us   back-to-back   2.72 us/call
+CUDA graph capture of 10 chained launches + replay (and replay with new input data): PASS
+== check 4: intrinsics
+(a) mma.sync m16n8k16 bf16, fragments from global: rc=0 max_abs_err=9.537e-07 PASS
+(b,c,d) cp.async -> padded smem -> ldmatrix (x4 / x2.trans) -> mma: rc=0 max_abs_err=9.537e-07 PASS
+(e1) fp8 e4m3 mma.sync m16n8k32 via mma(): rc=0 max_abs_err=0.000e+00 PASS
+(e2) fp4 e2m1 block-scaled mma.sync m16n8k64: rc=0 D[0,:4]=[240.0, 240.0, 240.0, 240.0] want 240.0 PASS
+(e2) fp4 e2m1 block-scaled mma.sync m16n8k64: rc=0 D[0,:4]=[480.0, 480.0, 480.0, 480.0] want 480.0 PASS
+(e2) fp4 e2m1 block-scaled mma.sync m16n8k64: rc=0 D[0,:4]=[64.0, 64.0, 64.0, 64.0] want 64.0 PASS
+--- PTX
+      1 sass/mma_direct.ptx:mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+      2 sass/mma_ldm_cpasync.ptx:cp.async.cg.shared.global
+      1 sass/mma_ldm_cpasync.ptx:cp.async.commit_group
+      1 sass/mma_ldm_cpasync.ptx:cp.async.wait_all
+      1 sass/mma_ldm_cpasync.ptx:ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16
+      1 sass/mma_ldm_cpasync.ptx:ldmatrix.sync.aligned.m8n8.x4.shared.b16
+      1 sass/mma_ldm_cpasync.ptx:mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+--- SASS
+      1 sass/mma_direct.sass:HMMA.16816.F32.BF16
+      1 sass/mma_ldm_cpasync.sass:DEPBAR.LE
+      1 sass/mma_ldm_cpasync.sass:HMMA.16816.F32.BF16
+      2 sass/mma_ldm_cpasync.sass:LDGDEPBAR
+      2 sass/mma_ldm_cpasync.sass:LDGSTS.E.BYPASS.128
+      1 sass/mma_ldm_cpasync.sass:LDSM.16.M88.4
+      1 sass/mma_ldm_cpasync.sass:LDSM.16.MT88.2
+--- PTX
+      1 sass/mma_fp8_api.ptx:mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+--- SASS
+      1 sass/mma_fp8_api.sass:QMMA.16832.F32.E4M3.E4M3
+--- PTX
+      1 sass/mma_fp4.ptx:mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4
+--- SASS
+      1 sass/mma_fp4.sass:OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X
+== check 5: bandwidth
+mojo grid=   192 block=256:   232.0 GB/s
+mojo grid=   384 block=256:   230.2 GB/s
+mojo grid=   768 block=256:   232.6 GB/s
+mojo grid=  1536 block=256:   232.1 GB/s
+mojo grid=  3072 block=256:   233.6 GB/s
+mojo grid=  6144 block=256:   232.6 GB/s
+mojo grid= 12288 block=256:   231.8 GB/s
+reduction matches torch (mod 2^32): True
+torch x.sum() int32 1 GiB:    43.1 GB/s
+torch bf16 sum(dtype=f32) same bytes:   191.1 GB/s
+best mojo 233.6 GB/s (grid 3072); GB10 peak ~273 GB/s
