@@ -3,6 +3,11 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **Faster HIP kernels on gfx12.** The decode matmul and the tree attention's shared kernel use 32-bit index
+  math, scheduler barriers and look-ahead loads, with the same bits: a drafted round of the 27B at 61k tokens takes 44.9 ms instead of 48.0 ms on an R9700.
+
 ## 0.6.2 (2 Oct 2026)
 
 - **Flash Next on Macs at 64k-128k.** On an M3 Ultra, one stream runs 1.2-3.4% faster at 64k and 3.9-5.5% at 128k,
