@@ -281,7 +281,8 @@ def _slices(kg: int, n: int, wmma: bool, fill: int) -> int:
 def reload_settings() -> None:
     """Read the ``TF_ROCM_*`` tuning variables again (cached: the lane matmul runs hundreds of times a step)."""
 
-    for f in (lane_config, lane_kernel, prefill_config, prefill8_config, prefill8_group, wmma_fill):
+    for f in (lane_config, lane_kernel, prefill_config, prefill8_config, prefill8_group, prefill_gemm,
+              prefill_mojo_tile, wmma_fill):
         f.cache_clear()
 
 
@@ -373,6 +374,58 @@ def dequantize(words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, 
     return out
 
 
+# Mojo prompt GEMM tiles: (kernel, rows a block, outputs a block, threads a block); never a bit of the output
+PREFILL_TILES = {"128x256": ("gemm_128x256", 128, 256, 256), "256x128": ("gemm_256x128", 256, 128, 256),
+                 "128x128": ("gemm_128x128", 128, 128, 128)}
+
+
+@lru_cache(maxsize=1)
+def prefill_gemm() -> str:
+    """The prompt GEMM after the weight's bf16 rounding: ``triton`` (``_gemm``, the default) or ``mojo``
+    (``prefill_rocm.mojo``: the same WMMA chain over K, the same bits, built at first use by the ``mojo`` compiler);
+    ``TF_ROCM_PREFILL_GEMM`` picks it."""
+
+    kind = os.environ.get("TF_ROCM_PREFILL_GEMM") or "triton"
+    if kind not in ("triton", "mojo"):
+        raise ValueError("TF_ROCM_PREFILL_GEMM: triton or mojo")
+    if kind == "mojo":
+        from tensorfold.cuda.build import wmma
+
+        if not wmma("TF_ROCM_PREFILL_GEMM"):
+            raise ValueError("TF_ROCM_PREFILL_GEMM=mojo: the Mojo prompt GEMM builds for gfx12 GPUs only")
+    return kind
+
+
+@lru_cache(maxsize=1)
+def prefill_mojo_tile() -> int:
+    """The Mojo prompt GEMM's tile (``TF_ROCM_PREFILL_TILE``, rows x outputs a block): scheduling only, never bits."""
+
+    name = os.environ.get("TF_ROCM_PREFILL_TILE") or "128x256"
+    if name not in PREFILL_TILES:
+        raise ValueError(f"TF_ROCM_PREFILL_TILE: one of {', '.join(PREFILL_TILES)}")
+    return list(PREFILL_TILES).index(name)
+
+
+@lru_cache(maxsize=1)
+def _prefill_mojo():
+    """The Mojo prompt GEMM's launcher with its kernels loaded: ``prefill_rocm.mojo`` built to code objects at first
+    use (cached by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
+
+    from tensorfold.cuda.build import hip_arch, load
+    from tensorfold.cuda.mojo import build_hsaco
+
+    here = Path(__file__).parent
+    built, manifest = build_hsaco(here / "prefill_rocm.mojo", hip_arch())
+    ext = load(name="tensorfold_prefill_rocm_mojo_v1", sources=[str(here / "prefill_rocm_mojo.cpp"),
+                                                               str(here / "prefill_rocm_mojo.cu")],
+               extra_cuda_cflags=["-O3"], verbose=False)
+    k = {e["name"]: e for e in manifest["kernels"]}
+    tiles = list(PREFILL_TILES.values())
+    ext.load_kernels([str(built / k[t[0]]["hsaco"]) for t in tiles], [k[t[0]]["symbol"] for t in tiles],
+                     [t[1] for t in tiles], [t[2] for t in tiles], [t[3] for t in tiles])
+    return ext
+
+
 def prefill_matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, n: int, *,
                    f32: bool = False) -> torch.Tensor:
     """Prompt rows times the tiled weight: bf16 weights once, then a fixed-tile GEMM; any chunking, same bits."""
@@ -384,6 +437,10 @@ def prefill_matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, b
     x = x.contiguous()
     m = x.shape[0]
     w = dequantize(words, scales, biases, n)
+    if prefill_gemm() == "mojo":
+        out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+        _prefill_mojo().gemm(x, w, out, prefill_mojo_tile())
+        return out
     bm, bn, bk, warps, stages = prefill_config()
     if k % bk:
         bk = 64
@@ -500,5 +557,5 @@ def prefill_matmul8(x: tuple[torch.Tensor, torch.Tensor, torch.Tensor], words: t
 
 
 __all__ = ["bucket", "dequantize", "from_groups", "gemv", "group_sums", "lane_config", "lane_kernel", "matmul",
-           "prefill8_config", "prefill8_group", "prefill_config", "prefill_matmul", "prefill_matmul8",
+           "prefill8_config", "prefill8_group", "prefill_config", "prefill_gemm", "prefill_matmul", "prefill_matmul8",
            "reload_settings", "split_k", "to_groups", "wmma_fill"]
