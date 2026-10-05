@@ -315,14 +315,6 @@ __device__ __forceinline__ void store(const float8 (&o)[16], float m, float l, A
 }
 
 template <typename T>
-struct Committed {                          // a full committed chunk: every key's row from the cache
-    const T *kc, *vc;
-    size_t stride;
-    __device__ const T* k(int key) const { return kc + key * stride; }
-    __device__ const T* v(int key) const { return vc + key * stride; }
-};
-
-template <typename T>
 struct Bounded {                            // prompt keys: the cache's rows below ``keys``, none past them
     const T *kc, *vc;
     size_t stride;
@@ -377,18 +369,149 @@ struct TailStage8 {
     }
 };
 
-// The stage over one KV head's rows of a stream's caches, bf16 or packed: ``base`` plus ``offs`` counts bf16
-// elements for bf16 caches and bytes for packed ones (``attention.offsets``).
-template <bool KV8>
-__device__ __forceinline__ auto committed(const unsigned short* base, const int64_t* offs, int s, int hk,
-                                          int hk_count) {
-    if constexpr (KV8) {
-        const auto* b8 = reinterpret_cast<const unsigned char*>(base);
-        return Stage8<Committed<unsigned char>>{{b8 + offs[2 * s] + hk * ROW8, b8 + offs[2 * s + 1] + hk * ROW8,
-                                                 static_cast<size_t>(hk_count) * ROW8}};
-    } else {
-        return Stage16<Committed<unsigned short>>{{base + offs[2 * s] + hk * D, base + offs[2 * s + 1] + hk * D,
-                                                   static_cast<size_t>(hk_count) * D}};
+// Tree attention's loads take a wave-uniform base (a stream's chunk of one KV head, in SGPRs) and a 32-bit byte offset
+// within it: one ``global_load_b128 v, voff, s[base]`` a piece, no 64-bit address math.
+__device__ __forceinline__ uint4 ldg(const unsigned char* base, unsigned off) {
+    return *reinterpret_cast<const uint4*>(base + off);
+}
+
+// 8 bf16 rows of 8 lanes transposed in the load (global_load_tr_b128): lane j of each 8 gets element j of the 8 rows
+// its group named, so 8 keys of one value dim arrive in one lane.
+__device__ __forceinline__ uint4 ldg_tr(const unsigned char* base, unsigned off) {
+    typedef short short8g __attribute__((ext_vector_type(8)));
+    auto* p = (__attribute__((address_space(1))) short8g*)(base + off);
+    return __builtin_bit_cast(uint4, __builtin_amdgcn_global_load_tr_b128_v8i16(p));
+}
+
+// A transposed V piece (``ldg_tr``): lanes i .. i + 7 named keys i % 16 .. + 7 at dims (i / 16) 8 .. + 7, so lane i
+// holds dim (i / 16) 8 + i % 8 of those 8 keys: one 16-byte store into the transposed tile.
+__device__ __forceinline__ void put_vt(Tile& t, unsigned i, uint4 x) {
+    *reinterpret_cast<uint4*>(&t.vt[(i >> 4) * 8 + (i & 7)][i & 8]) = x;
+}
+
+// A full committed chunk, bf16 rows: ``kc``/``vc`` the chunk's first key of this KV head, ``stride`` bytes a key;
+// ``key0`` counts from the chunk's start. V arrives transposed (lanes i of a wave are pieces i: a wave's 8-lane
+// groups name 8 keys of one 8-dim column).
+struct Chunk16 {
+    static constexpr int P = 16 * D / 8, B = 4;
+    using Raw = uint4;
+    const unsigned char *kc, *vc;
+    unsigned stride;
+    __device__ Raw k(unsigned key0, unsigned i) const { return ldg(kc, (key0 + i / 32) * stride + (i % 32) * 16); }
+    __device__ Raw v(unsigned key0, unsigned i) const { return ldg_tr(vc, (key0 + i % 16) * stride + (i / 16) * 16); }
+    __device__ static void put(Tile& t, unsigned i, const Raw& kr, const Raw& vr) {
+        put_k(t, i, kr);
+        put_vt(t, i, vr);
+    }
+};
+
+struct Chunk8 {                             // the same over packed FP8 rows, 16 values a piece
+    static constexpr int P = 16 * D / 16, B = 2;
+    using Raw = Raw8;
+    const unsigned char *kc, *vc;
+    unsigned stride;
+    __device__ static Raw piece(const unsigned char* c, unsigned row, unsigned col) {
+        return Raw8{ldg(c, row + col), static_cast<signed char>(c[row + D])};
+    }
+    __device__ Raw k(unsigned key0, unsigned i) const { return piece(kc, (key0 + i / 16) * stride, (i % 16) * 16); }
+    __device__ Raw v(unsigned key0, unsigned i) const { return piece(vc, (key0 + i % 16) * stride, (i / 16) * 16); }
+    __device__ static void put(Tile& t, unsigned i, const Raw& kr, const Raw& vr) {
+        uint4 lo, hi;
+        widen(kr.b, kr.e, lo, hi);
+        put_k16(t, i, lo, hi);
+        widen(vr.b, vr.e, lo, hi);
+        put_v16(t, i, lo, hi);
+    }
+};
+
+// ``N`` bf16 pieces i0 + j step loaded, then put.
+template <int N>
+__device__ __forceinline__ void stage_n(Tile& t, const Chunk16& s, unsigned key0, unsigned i0, unsigned step) {
+    uint4 kr[N], vr[N];
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+        kr[j] = s.k(key0, i0 + j * step);
+        vr[j] = s.v(key0, i0 + j * step);
+    }
+#pragma unroll
+    for (int j = 0; j < N; ++j) Chunk16::put(t, i0 + j * step, kr[j], vr[j]);
+}
+
+// ``stage`` for a chunk's tile: every thread of the block, ``S::B`` pieces of K and of V loaded before any is put.
+// Pieces and block sizes are multiples of 32, so how many pieces a thread takes is its wave's (lane 0's, in an SGPR).
+// bf16: one branch per count, each loading and placing its own pieces (registers merged across branches cost moves
+// and a wait on every load); packed: a branch per piece.
+template <typename S>
+__device__ __forceinline__ void stage_chunk(Tile& t, const S& s, unsigned key0) {
+    const unsigned bd = blockDim.x;
+    for (unsigned b = 0; b < S::P; b += S::B * bd) {
+        const unsigned i0 = b + threadIdx.x, w0 = __builtin_amdgcn_readfirstlane(i0);
+        if constexpr (std::is_same_v<S, Chunk16>) {
+            unsigned count = 0;
+#pragma unroll
+            for (int j = 0; j < S::B; ++j)
+                if (w0 + j * bd < S::P) count = j + 1;
+            if (count == 4) stage_n<4>(t, s, key0, i0, bd);
+            else if (count == 3) stage_n<3>(t, s, key0, i0, bd);
+            else if (count == 2) stage_n<2>(t, s, key0, i0, bd);
+            else if (count == 1) stage_n<1>(t, s, key0, i0, bd);
+        } else {
+            typename S::Raw kr[S::B], vr[S::B];
+#pragma unroll
+            for (int j = 0; j < S::B; ++j) {
+                if (w0 + j * bd < S::P) {
+                    kr[j] = s.k(key0, i0 + j * bd);
+                    vr[j] = s.v(key0, i0 + j * bd);
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < S::B; ++j)
+                if (w0 + j * bd < S::P) S::put(t, i0 + j * bd, kr[j], vr[j]);
+        }
+    }
+}
+
+// load_tiles' and fold_tiles' schedule over a chunk's 32 tiles: tile kt sits in buffer kt % 2 while the loaders place
+// tile kt + 1 in the other and fetch tile kt + 3 into its registers, one barrier a tile. The steady steps fetch
+// unconditionally and the last four are written out (registers written under a condition merge across the branch:
+// moves and a wait on every load), and neither side unrolls the chunk (32 folds unrolled are 1,024 WMMAs of code).
+template <typename S>
+__device__ __forceinline__ void load_chunk(Tile (&tb)[2], const S& s, int lt) {
+    constexpr int nt = CH / 16;
+    Pieces<S> r0, r1;
+    fetch(r0, s, 0, lt);
+    fetch(r1, s, 16, lt);
+    place(tb[0], r0, lt);
+    fetch(r0, s, 32, lt);
+    __syncthreads();
+#pragma unroll 1
+    for (int kt = 0; kt + 4 < nt; kt += 2) {
+        place(tb[1], r1, lt);
+        fetch(r1, s, 16 * (kt + 3), lt);
+        __syncthreads();
+        place(tb[0], r0, lt);
+        fetch(r0, s, 16 * (kt + 4), lt);
+        __syncthreads();
+    }
+    place(tb[1], r1, lt);                                       // step nt - 4
+    fetch(r1, s, 16 * (nt - 1), lt);
+    __syncthreads();
+    place(tb[0], r0, lt);                                       // step nt - 3
+    __syncthreads();
+    place(tb[1], r1, lt);                                       // step nt - 2
+    __syncthreads();
+    __syncthreads();                                            // step nt - 1
+}
+
+template <typename Fold>
+__device__ __forceinline__ void fold_chunk(const Tile (&tb)[2], Fold&& fold_tile) {
+    __syncthreads();
+#pragma unroll 1
+    for (int kt = 0; kt < CH / 16; kt += 2) {
+        fold_tile(tb[0]);
+        __syncthreads();
+        fold_tile(tb[1]);
+        __syncthreads();
     }
 }
 
@@ -414,10 +537,17 @@ __global__ void __launch_bounds__(PIPE ? 384 : 256) shared_kernel(
     const bool loader = wave >= cw;
     const int pairs = rows * g, first_pair = first + 16 * wave;
     const bool live = !loader && first_pair < pairs;           // wave-uniform
-    const auto src = committed<KV8>(base, offs, s, hk, hk_count);
+    // the chunk's keys of this head: ``base`` plus ``offs`` counts bf16 elements for bf16 caches, bytes for packed
+    const auto* b8 = reinterpret_cast<const unsigned char*>(base);
+    const unsigned row = KV8 ? ROW8 : 2 * D, stride = static_cast<unsigned>(hk_count) * row;
+    const size_t at = static_cast<size_t>(chunk) * CH * stride + static_cast<size_t>(hk) * row;
+    const auto src = [&] {
+        if constexpr (KV8) return Chunk8{b8 + offs[2 * s] + at, b8 + offs[2 * s + 1] + at, stride};
+        else return Chunk16{b8 + 2 * offs[2 * s] + at, b8 + 2 * offs[2 * s + 1] + at, stride};
+    }();
     if constexpr (PIPE) {
         if (loader) {
-            load_tiles(tb, src, chunk * CH, CH / 16, threadIdx.x - 32 * cw);
+            load_chunk(tb, src, threadIdx.x - 32 * cw);
             return;
         }
     }
@@ -430,13 +560,13 @@ __global__ void __launch_bounds__(PIPE ? 384 : 256) shared_kernel(
     for (int n = 0; n < 16; ++n) o[n] = float8{0, 0, 0, 0, 0, 0, 0, 0};
     float m = NEG, l = 0.0f;
     if constexpr (PIPE) {
-        fold_tiles(tb, CH / 16, [&](const Tile& t, int) {
+        fold_chunk(tb, [&](const Tile& t) {
             if (live) fold(t, qb, o, m, l, 0xFFFFu, scale, c, half);
         });
     } else {
         for (int kt = 0; kt < CH / 16; ++kt) {
             __syncthreads();                                    // the previous tile is consumed
-            stage(tb[0], src, chunk * CH + 16 * kt);
+            stage_chunk(tb[0], src, 16 * kt);
             __syncthreads();
             if (live) fold(tb[0], qb, o, m, l, 0xFFFFu, scale, c, half);
         }
