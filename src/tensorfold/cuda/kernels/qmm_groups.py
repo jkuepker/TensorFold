@@ -184,7 +184,7 @@ def _rocm():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_rocm_v15", sources=[str(here / "qmm_rocm.cpp"), str(here / "qmm_rocm.cu")],
+    return load(name="tensorfold_qmm_rocm_v16", sources=[str(here / "qmm_rocm.cpp"), str(here / "qmm_rocm.cu")],
                 extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
 
 
