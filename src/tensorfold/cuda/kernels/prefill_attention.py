@@ -85,7 +85,7 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
     out = torch.empty_like(q)
     kind = _rocm_kernel(h, hk, d) if hip() and gfx12() else None
     if kind:                                # gfx12: bf16 caches, or packed FP8 rows (uint8, ``kv8.ROW8``)
-        (_mojo() if kind == "mojo" else _rocm()).attention(q, k_cache, v_cache, out, p0, scale, *rocm_rows(w))
+        (_mojo(q.get_device()) if kind == "mojo" else _rocm()).attention(q, k_cache, v_cache, out, p0, scale, *rocm_rows(w))
         return out
     if k_cache.dtype == torch.uint8:
         raise ValueError("packed FP8 key/value caches need ROCm's WMMA prompt attention (gfx12, head size 256, without "
@@ -192,11 +192,11 @@ def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> str | None:
     if not wmma("TF_ROCM_ATTN_KERNEL"):
         return None
     if os.environ.get("TF_ROCM_ATTN_KERNEL") == "mojo":
-        return "mojo" if _mojo().prompt_supported(heads, kv_heads, dim) else None
+        return "mojo" if _mojo(torch.cuda.current_device()).prompt_supported(heads, kv_heads, dim) else None
     return "wmma" if _rocm().supported(heads, kv_heads, dim) else None
 
 
-def _mojo():
+def _mojo(device: int):
     from tensorfold.cuda.kernels.attention import _mojo as extension    # Mojo prompt and tree attention: one launcher
 
-    return extension()
+    return extension(device)

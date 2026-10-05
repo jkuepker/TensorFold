@@ -217,25 +217,36 @@ def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
 
 
 @lru_cache(maxsize=1)
-def _mojo():
-    """The Mojo attention's launcher (tree and prompt) with its kernels loaded: ``attention_rocm.mojo`` built to code
-    objects at first use (cached by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
+def _mojo_ext():
+    from pathlib import Path
+
+    from tensorfold.cuda.build import load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_attention_rocm_mojo_v3", sources=[str(here / "attention_rocm_mojo.cpp"),
+                                                                  str(here / "attention_rocm_mojo.cu")],
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=None)
+def _mojo(device: int):
+    """The Mojo attention's launcher (tree and prompt) with its kernels loaded on GPU ``device``:
+    ``attention_rocm.mojo`` built to code objects at first use (cached by its hash and the GPU's architecture, so
+    same-architecture cards share them), launched with hipModuleLaunchKernel on torch's current stream of the tensors'
+    GPU."""
 
     from pathlib import Path
 
-    from tensorfold.cuda.build import hip_arch, load
+    from tensorfold.cuda.build import hip_arch
     from tensorfold.cuda.mojo import build_hsaco
 
-    here = Path(__file__).parent
-    built, manifest = build_hsaco(here / "attention_rocm.mojo", hip_arch())
-    ext = load(name="tensorfold_attention_rocm_mojo_v2", sources=[str(here / "attention_rocm_mojo.cpp"),
-                                                                 str(here / "attention_rocm_mojo.cu")],
-               extra_cuda_cflags=["-O3"], verbose=False)
+    built, manifest = build_hsaco(Path(__file__).parent / "attention_rocm.mojo", hip_arch(device))
+    ext = _mojo_ext()
     k = {e["name"]: e for e in manifest["kernels"]}
     names = ("shared_pipe", "shared_pipe8", "shared_flat", "shared_flat8", "tail16", "tail8", "merge",
              *(f"prompt_{kind}{waves}{fmt}" for kind, sizes in (("p", (8, 12, 16, 20)), ("f", (8, 12, 16)))
                for waves in sizes for fmt in ("b", "k")))
-    ext.load_kernels([str(built / k[n]["hsaco"]) for n in names], [k[n]["symbol"] for n in names])
+    ext.load_kernels(device, [str(built / k[n]["hsaco"]) for n in names], [k[n]["symbol"] for n in names])
     return ext
 
 
@@ -360,7 +371,7 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     tails = 1 + -(-MAX_NODES // CHUNK)
     kind = _rocm_kernel(h, hk, d) if hip() and gfx12() else None
     if kind:                                            # gfx12: WMMA for head size 256
-        ext = _mojo() if kind == "mojo" else _rocm()
+        ext = _mojo(q.get_device()) if kind == "mojo" else _rocm()
         ext.shared(q, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l, hk,
                    *rocm_launch(-(-w * g // QUERY_TILE), p.chunks), scale, kv8)
         ext.tail(q, k_nodes, v_nodes, origin, offs, p.streams, p.rows, p.paths, p.depths, partial_o, partial_m,

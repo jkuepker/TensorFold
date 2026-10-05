@@ -27,9 +27,9 @@ def hip() -> bool:
     return getattr(torch.version, "hip", None) is not None
 
 
-def hip_arch() -> str:
-    """The AMD GPU's architecture as hipcc names it, e.g. ``gfx1201`` (feature suffixes dropped); without a visible
-    GPU, the first of ``PYTORCH_ROCM_ARCH`` (a build-only host)."""
+def hip_arch(device: int = 0) -> str:
+    """AMD GPU ``device``'s architecture as hipcc names it, e.g. ``gfx1201`` (feature suffixes dropped); without a
+    visible GPU, the first of ``PYTORCH_ROCM_ARCH`` (a build-only host)."""
 
     import torch
 
@@ -37,7 +37,7 @@ def hip_arch() -> str:
         return os.environ["PYTORCH_ROCM_ARCH"].replace(",", ";").split(";")[0].strip()
     from .rocm import offload_arch
 
-    return offload_arch()
+    return offload_arch(device)
 
 
 @lru_cache(maxsize=1)                               # a process's GPU: read once (the decode path asks per call)

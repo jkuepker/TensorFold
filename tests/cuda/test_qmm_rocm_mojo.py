@@ -98,7 +98,7 @@ def test_mojo_lane_is_picked_by_tf_rocm_lane(monkeypatch):
 def test_mojo_reduce_adds_slices_in_order(slices, total, f32):
     part = torch.randn(slices, total, device="cuda") * 1e3
     out = torch.empty(total, device="cuda", dtype=torch.float32 if f32 else torch.bfloat16)
-    qmm_groups._mojo().reduce_slices(part, slices, out)
+    qmm_groups._mojo(out.get_device()).reduce_slices(part, slices, out)
     ref = part[0].clone()
     for s in range(1, slices):
         ref = ref + part[s]
@@ -115,3 +115,26 @@ def test_missing_mojo_says_so(monkeypatch):
             mojo.mojo_binary()
     finally:
         mojo.mojo_binary.cache_clear()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_mojo_gives_the_wmma_bits_on_each_gpu():
+    """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its
+    tensors' GPU."""
+
+    n, k = 1000, 1024
+    for dev in (0, 1, 0):
+        with torch.cuda.device(dev):
+            g, gen = _weight(n, k, n + k)
+            x = torch.randn(40, k, generator=gen, device="cuda").bfloat16()
+            for m in (1, 12, 33, 40):
+                assert _same(x[:m].contiguous(), g, n), (dev, m)
+                assert _same(x[:m].contiguous(), g, n, f32=True), (dev, m)
+    with torch.cuda.device(1):
+        g, gen = _weight(n, k, n + k)
+        x = torch.randn(12, k, generator=gen, device="cuda").bfloat16()
+        xs = qmm_groups.group_sums(x)
+        want = qmm_groups.gemv(x, *g, n, xs, wmma=True)
+    with torch.cuda.device(0):
+        got = qmm_groups.gemv(x, *g, n, xs, mojo=True)
+    assert torch.equal(want.view(torch.int16), got.view(torch.int16))

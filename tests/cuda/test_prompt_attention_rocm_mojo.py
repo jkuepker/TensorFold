@@ -38,7 +38,7 @@ def _both(q, k, v, p0, rb, pipe):
     scale = D ** -0.5
     ref, got = torch.empty_like(q), torch.empty_like(q)
     prefill_attention._rocm().attention(q, k, v, ref, p0, scale, rb, pipe)
-    tree._mojo().attention(q, k, v, got, p0, scale, rb, pipe)
+    tree._mojo(q.get_device()).attention(q, k, v, got, p0, scale, rb, pipe)
     return ref, got
 
 

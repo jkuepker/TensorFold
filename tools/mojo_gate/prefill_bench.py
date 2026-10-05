@@ -133,7 +133,7 @@ def bench_attn() -> None:
     from tensorfold.cuda.kernels import kv8, prefill_attention
 
     h, hk, d = 24, 4, 256
-    hip_ext, mojo_ext = prefill_attention._rocm(), tree._mojo()
+    hip_ext, mojo_ext = prefill_attention._rocm(), tree._mojo(torch.cuda.current_device())
     gen = torch.Generator(device="cuda").manual_seed(2)
     print(f"{'chunk':<10} {'p0':>6} {'W':>5} {'cache':>5} {'hip':>18} {'mojo':>24}")
     for packed in (False, True):

@@ -189,21 +189,29 @@ def _rocm():
 
 
 @lru_cache(maxsize=1)
-def _mojo():
-    """The Mojo lane's launcher with its kernels loaded: ``qmm_rocm.mojo`` built to code objects at first use (cached
-    by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
-
-    from tensorfold.cuda.build import hip_arch, load
-    from tensorfold.cuda.mojo import build_hsaco
+def _mojo_ext():
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    built, manifest = build_hsaco(here / "qmm_rocm.mojo", hip_arch())
-    ext = load(name="tensorfold_qmm_rocm_mojo_v1", sources=[str(here / "qmm_rocm_mojo.cpp"),
-                                                            str(here / "qmm_rocm_mojo.cu")],
-               extra_cuda_cflags=["-O3"], verbose=False)
+    return load(name="tensorfold_qmm_rocm_mojo_v2", sources=[str(here / "qmm_rocm_mojo.cpp"),
+                                                             str(here / "qmm_rocm_mojo.cu")],
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=None)
+def _mojo(device: int):
+    """The Mojo lane's launcher with its kernels loaded on GPU ``device``: ``qmm_rocm.mojo`` built to code objects at
+    first use (cached by its hash and the GPU's architecture, so same-architecture cards share them), launched with
+    hipModuleLaunchKernel on torch's current stream of the tensors' GPU."""
+
+    from tensorfold.cuda.build import hip_arch
+    from tensorfold.cuda.mojo import build_hsaco
+
+    built, manifest = build_hsaco(Path(__file__).parent / "qmm_rocm.mojo", hip_arch(device))
+    ext = _mojo_ext()
     k = {e["name"]: e for e in manifest["kernels"]}
-    ext.load_kernels(*(v for name in ("wmma_mt1", "wmma_mt2", "reduce_kernel")
-                       for v in (str(built / k[name]["hsaco"]), k[name]["symbol"])))
+    ext.load_kernels(device, *(v for name in ("wmma_mt1", "wmma_mt2", "reduce_kernel")
+                               for v in (str(built / k[name]["hsaco"]), k[name]["symbol"])))
     return ext
 
 
@@ -243,7 +251,7 @@ def gemv(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, biases: tor
     part = (torch.empty((slices * min(m, 32 if wmma else 16) * n,), dtype=torch.float32, device=x.device)
             if slices > 1 or f32 else out)                 # unread when one slice writes its output directly
     if mojo:
-        _mojo().gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, fill, _counts(x.device, n))
+        _mojo(x.get_device()).gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, fill, _counts(x.device, n))
     else:
         _rocm().gemv_groups(x, xs.contiguous(), words, scales, biases, n, out, part, wmma, fill, _counts(x.device, n))
     return out

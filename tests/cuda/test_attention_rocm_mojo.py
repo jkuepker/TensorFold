@@ -58,10 +58,10 @@ def _offs(caches):
 def _partials(kind, q, kn, vn, offs, plan, scale, kv8, launch):
     w, h, _ = q.shape
     hk = kn.shape[1]
-    ext = shared._mojo() if kind == "mojo" else shared._rocm()
-    po = torch.full((plan.chunks, w, h, D), SENTINEL, device="cuda")
-    pm = torch.full((plan.chunks, w, h), SENTINEL, device="cuda")
-    pl = torch.full((plan.chunks, w, h), SENTINEL, device="cuda")
+    ext = shared._mojo(q.get_device()) if kind == "mojo" else shared._rocm()
+    po = torch.full((plan.chunks, w, h, D), SENTINEL, device=q.device)
+    pm = torch.full((plan.chunks, w, h), SENTINEL, device=q.device)
+    pl = torch.full((plan.chunks, w, h), SENTINEL, device=q.device)
     cw, pipe = launch or shared.rocm_launch(-(-w * (h // hk) // shared.QUERY_TILE), plan.chunks)
     origin = shared.base(q.device)
     ext.shared(q, origin, offs, plan.streams, plan.items, po, pm, pl, hk, cw, pipe, scale, kv8)
@@ -182,3 +182,33 @@ def test_mojo_reads_no_key_past_an_exact_cache(monkeypatch, w, p, kv8):
     inputs = (q, kn, vn, kc, vc)
     _same(monkeypatch, _fp8(inputs) if kv8 else inputs, [[-1] + list(range(w - 1))], [p], kv8=kv8)
     torch.cuda.synchronize()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_mojo_gives_the_hip_bits_on_each_gpu():
+    """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its
+    tensors' GPU."""
+
+    w, p = 9, 513
+    for kv8 in (False, True):
+        for dev in (0, 1, 0):
+            with torch.cuda.device(dev):
+                inputs = _inputs(w, p)
+                inputs = _fp8(inputs) if kv8 else inputs
+                plan = shared.plan([_tree(w)], [p], inputs[0].shape[1] // inputs[1].shape[1], "cuda")
+                offs = _offs([inputs[3:]])
+                q, kn, vn = inputs[:3]
+                for a, b in zip(_partials("wmma", q, kn, vn, offs, plan, 1 / 16, kv8, None),
+                                _partials("mojo", q, kn, vn, offs, plan, 1 / 16, kv8, None)):
+                    assert torch.equal(a, b), dev
+        with torch.cuda.device(1):
+            inputs = _inputs(w, p)
+            inputs = _fp8(inputs) if kv8 else inputs
+            plan = shared.plan([_tree(w)], [p], inputs[0].shape[1] // inputs[1].shape[1], "cuda")
+            offs = _offs([inputs[3:]])
+            q, kn, vn = inputs[:3]
+            want = _partials("wmma", q, kn, vn, offs, plan, 1 / 16, kv8, None)
+        with torch.cuda.device(0):
+            got = _partials("mojo", q, kn, vn, offs, plan, 1 / 16, kv8, None)
+        for a, b in zip(want, got):
+            assert torch.equal(a, b)
