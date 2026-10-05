@@ -63,7 +63,7 @@ struct OnDevice {
     }
 };
 
-int device_of(const at::Tensor& t) {
+int gpu_of(const at::Tensor& t) {
     const int device = t.get_device();
     TORCH_CHECK(device >= 0 && device < MAX_GPUS, "the Mojo lane matmul takes tensors on a GPU");
     return device;
@@ -146,7 +146,7 @@ int wmma_slices(int kg, int n, int fill) {
 // counts: zeros, one per 128 outputs, left at zero.
 void gemv_groups(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& words, const at::Tensor& scales,
                  const at::Tensor& biases, int n, at::Tensor& out, at::Tensor& part, int fill, at::Tensor& counts) {
-    const int device = device_of(x);
+    const int device = gpu_of(x);
     const Kernels& k = kernels(device);
     OnDevice here(device);
     int kg = words.size(1);
@@ -177,7 +177,7 @@ void gemv_groups(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& wo
 
 // part (slices, total) fp32 -> out (total) fp32 or bf16, slices added in order (qmm_rocm.cu's reduce_kernel).
 void reduce_slices(const at::Tensor& part, int slices, at::Tensor& out) {
-    const int device = device_of(out);
+    const int device = gpu_of(out);
     const Kernels& k = kernels(device);
     OnDevice here(device);
     int64_t total = out.numel();
