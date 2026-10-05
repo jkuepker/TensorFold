@@ -200,3 +200,18 @@ TF_ROCM_PREFILL_GEMM TF_ROCM_PREFILL8_GEMM TF_ROCM_ATTN_KERNEL` = mojo; localeva
 tok/s A 1477-1480 / 1485-1486 / 1416-1418 at 4k/16k/30k, B 1660-1668 / 1687-1688 / 1608-1609 (+12.5%, +13.6%,
 +13.5%); greedy replies byte-identical in all four (8ec3b3018edf, 27b232152250, drafts on and off). Runs
 20261004-231556-adhoc-p5-A1-default, -231907-...-B1-mojo, -232140-...-A2-default, -232423-...-B2-mojo.
+
+## Merge of mojo-multigpu and hip-tuning-backport, review fixes (2026-10-05)
+
+Card B, fleetq #490, fresh extensions dir. The ROCm GPU set (test_qmm_rocm, test_attention, test_prefill_attention,
+every test_*_mojo, every tests/cuda/test_qwen27_*, test_cuda_build, test_cuda_kv8, test_cuda_mojo): 645 passed, 22
+skipped, 2 xfailed, 1 error with all defaults and with all five Mojo flags, the same 670 results test for test (the
+error: test_qwen27_server_errors' startup budget on a 32 GB card; the xfails: the tree merge at G=16, below).
+- The 4 GiB fix (per-tile 64-bit cache base in `fetch_c`, the tail's from its first chunk): VGPRs and scratch of every
+  attention kernel unchanged, 3-7 more SGPRs in the flat and prompt-flat kernels; caches past 4 GiB give the HIP bits.
+- attn_bench: Mojo totals within 1% of attn_bench_results.txt at bf16; packed FP8 16k at 12 rows measures 177-180 us
+  against 163-166 us before, but the same Mojo code measures 163 us when the bench alternates it with the old HIP
+  kernel and 179 us with the backported one (commits a739558 vs e8c2ca4): the bench's interleaving, not the kernel
+  (its shared launch alone stays 145-150 us).
+- G=16 (16 query heads a KV head): the shared and tail partials equal the HIP kernels', but Triton's `_merge` compiled
+  at G=16 and the Mojo merge differ by 1-3 ulp on a few values a launch; G <= 8 match (the 27B is 6).
