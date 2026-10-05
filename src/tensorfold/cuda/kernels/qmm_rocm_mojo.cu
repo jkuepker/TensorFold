@@ -38,7 +38,7 @@ constexpr int SLAB = 4;
 constexpr int MAX_GPUS = 16;
 
 struct Kernels {
-    hipFunction_t mt1 = nullptr, mt2 = nullptr, reduce = nullptr;
+    hipFunction_t mt1 = nullptr, mt2 = nullptr;
     int resident = 0, two = 0;  // persistent blocks the GPU holds at once (one-tile kernel; two-tile kernel)
     std::atomic<bool> ready{false};
 };
@@ -110,7 +110,7 @@ void launch(hipFunction_t fn, int device, int grid, int block, void** args) {
 }  // namespace
 
 void load_kernels(int device, const std::string& mt1, const std::string& mt1_symbol, const std::string& mt2,
-                  const std::string& mt2_symbol, const std::string& reduce, const std::string& reduce_symbol) {
+                  const std::string& mt2_symbol) {
     TORCH_CHECK(device >= 0 && device < MAX_GPUS, "GPU ", device, ": the Mojo lane matmul takes ", MAX_GPUS,
                 " at most");
     Kernels& k = g_kernels[device];
@@ -118,7 +118,6 @@ void load_kernels(int device, const std::string& mt1, const std::string& mt1_sym
     if (k.ready.load(std::memory_order_relaxed)) return;
     OnDevice here(device);
     k.mt2 = load_one(mt2, mt2_symbol);
-    k.reduce = load_one(reduce, reduce_symbol);
     hipFunction_t one = load_one(mt1, mt1_symbol);
     k.two = per_gpu(k.mt2);
     const char* cap = std::getenv("TF_ROCM_WMMA_GRID");
@@ -173,18 +172,4 @@ void gemv_groups(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& wo
                         &cnt, &grid};
         launch(mt == 1 ? k.mt1 : k.mt2, device, grid, 32 * WARPS, args);
     }
-}
-
-// part (slices, total) fp32 -> out (total) fp32 or bf16, slices added in order (qmm_rocm.cu's reduce_kernel).
-void reduce_slices(const at::Tensor& part, int slices, at::Tensor& out) {
-    const int device = gpu_of(out);
-    const Kernels& k = kernels(device);
-    OnDevice here(device);
-    int64_t total = out.numel();
-    int f32 = out.scalar_type() == at::kFloat ? 1 : 0;
-    void* pp = part.data_ptr();
-    void* o32 = f32 ? out.data_ptr() : nullptr;
-    void* o16 = f32 ? nullptr : out.data_ptr();
-    void* args[] = {&pp, &slices, &total, &o32, &o16, &f32};
-    if (total > 0) launch(k.reduce, device, static_cast<int>((total + 255) / 256), 256, args);
 }

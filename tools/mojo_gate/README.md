@@ -65,8 +65,8 @@ isa_dump.sh, bw.mojo/.py, isa/.
 ## Phase 1: the lane matmul in Mojo (`TF_ROCM_LANE=mojo`)
 
 `src/tensorfold/cuda/kernels/qmm_rocm.mojo` ports `qmm_rocm.cu`'s `wmma_kernel` (one tile: `wmma_mt1`, two tiles:
-`wmma_mt2`, the only instantiations the wmma lane launches) and `reduce_kernel` (the dot2 lane's; the wmma lane adds
-its K slices in-kernel, so the mojo lane never launches it: it is ported and tested on its own). `cuda/mojo.py`
+`wmma_mt2`, the only instantiations the wmma lane launches). `reduce_kernel` (the dot2 lane's: the wmma lane adds its
+K slices in-kernel) was ported and tested on its own at first, then dropped since nothing launched it. `cuda/mojo.py`
 builds the source to .hsaco at first use (cached under the torch extensions dir by source hash + `mojo --version` +
 arch); `qmm_rocm_mojo.cu` loads them once and launches with hipModuleLaunchKernel on torch's current stream, with
 `gemv_groups`' schedule (32-row passes, shape-fixed K slices, persistent grid from module occupancy).

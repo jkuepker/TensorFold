@@ -193,7 +193,7 @@ def _mojo_ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_rocm_mojo_v2", sources=[str(here / "qmm_rocm_mojo.cpp"),
+    return load(name="tensorfold_qmm_rocm_mojo_v3", sources=[str(here / "qmm_rocm_mojo.cpp"),
                                                              str(here / "qmm_rocm_mojo.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
@@ -210,7 +210,7 @@ def _mojo(device: int):
     built, manifest = build_hsaco(Path(__file__).parent / "qmm_rocm.mojo", hip_arch(device))
     ext = _mojo_ext()
     k = {e["name"]: e for e in manifest["kernels"]}
-    ext.load_kernels(device, *(v for name in ("wmma_mt1", "wmma_mt2", "reduce_kernel")
+    ext.load_kernels(device, *(v for name in ("wmma_mt1", "wmma_mt2")
                                for v in (str(built / k[name]["hsaco"]), k[name]["symbol"])))
     return ext
 

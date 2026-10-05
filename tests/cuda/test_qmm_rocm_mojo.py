@@ -115,18 +115,6 @@ def test_mojo_lane_needs_no_hip_extension(monkeypatch):
     assert torch.equal(got, qmm_groups.gemv(x, *g, 1024, wmma=True))
 
 
-@pytest.mark.parametrize("slices,total", [(2, 1), (3, 1000), (16, 70001)])
-@pytest.mark.parametrize("f32", [False, True])
-def test_mojo_reduce_adds_slices_in_order(slices, total, f32):
-    part = torch.randn(slices, total, device="cuda") * 1e3
-    out = torch.empty(total, device="cuda", dtype=torch.float32 if f32 else torch.bfloat16)
-    qmm_groups._mojo(out.get_device()).reduce_slices(part, slices, out)
-    ref = part[0].clone()
-    for s in range(1, slices):
-        ref = ref + part[s]
-    assert torch.equal(out, ref if f32 else ref.bfloat16())
-
-
 def test_missing_mojo_says_so(monkeypatch):
     monkeypatch.delenv("TF_MOJO", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: None)

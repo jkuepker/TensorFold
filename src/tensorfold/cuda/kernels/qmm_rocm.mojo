@@ -1,4 +1,4 @@
-# The ROCm decode lane matmul (qmm_rocm.cu's wmma_kernel and reduce_kernel) in Mojo, for gfx12 (wave32), launched
+# The ROCm decode lane matmul (qmm_rocm.cu's wmma_kernel) in Mojo, for gfx12 (wave32), launched
 # from qmm_rocm_mojo.cu with hipModuleLaunchKernel (TF_ROCM_LANE=mojo). The arithmetic is the HIP kernel's, step for
 # step, so the two lanes give the same bits: each 64-input group's dot on bf16 128 + q from four chained
 # v_wmma_f32_16x16x16_bf16 (K steps 0..3, zero start), then acc = fma(xs, b - 128 s, fma(p, s, acc)) in group order,
@@ -346,21 +346,6 @@ def wmma_mt2(
     wmma_body[2](x, ldx2, m, xs, kg, gps, slices, words, scales, biases, n, part, dst, f32, counts, nblocks)
 
 
-# K slices added in slice order: part (slices, total) fp32 -> out fp32 (f32) or bf16. 256-thread blocks.
-@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
-def reduce_kernel(part: FPtr, slices: Int32, total: Int64, out32: FPtr, out16: U16Ptr, f32: Int32):
-    var i = Int(block_idx.x) * 256 + Int(thread_idx.x)
-    if i >= Int(total):
-        return
-    var acc = part[i]
-    for s in range(1, Int(slices)):
-        acc = acc + part[s * Int(total) + i]
-    if f32 != 0:
-        out32[i] = acc
-    else:
-        out16[i] = bf16_round(acc)
-
-
 @export
 def tf_qmm_instantiate(a: Int) abi("C") -> Int:
     try:
@@ -372,7 +357,6 @@ def tf_qmm_instantiate(a: Int) abi("C") -> Int:
         var z = Int32(0)
         ctx.enqueue_function[wmma_mt1](u, z, z, f, z, z, z, u, s, s, z, f, s, z, i, z, grid_dim=1, block_dim=THREADS)
         ctx.enqueue_function[wmma_mt2](u, z, z, f, z, z, z, u, s, s, z, f, s, z, i, z, grid_dim=1, block_dim=THREADS)
-        ctx.enqueue_function[reduce_kernel](f, z, Int64(0), f, s, z, grid_dim=1, block_dim=256)
         return 0
     except:
         return 1
