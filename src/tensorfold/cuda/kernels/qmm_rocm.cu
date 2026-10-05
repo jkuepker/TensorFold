@@ -144,13 +144,26 @@ __global__ void __launch_bounds__(32 * WARPS) gemv_kernel(
 // and for A's row l % 16. D holds rows 8h .. 8h + 7. Padding rows are zeros; the row count changes nothing a row
 // computes, and neither does the grid: an item's slice bounds come from the weight's shape.
 constexpr int SLAB = 4;         // groups a slab stages (their WMMA chains interleave)
+constexpr int THREADS = 32 * WARPS;
+constexpr int XROW = SLAB * 8 + 1;  // uint4 a staged row: 8 bf16 a uint4; +1: rows off each other's banks
 
-__device__ __forceinline__ Fetch fetch_nt(const int4* __restrict__ words, const unsigned short* __restrict__ scales,
-                                          const unsigned short* __restrict__ biases, int g, bool ok, int kg, int col,
-                                          int half) {
-    Fetch f{make_int4(0, 0, 0, 0), 0, 0};
+// A group's reads for a WMMA lane. Scale and bias each take a 32-bit register: packed two to one, the d16_hi load
+// waits out the d16 one, a full memory round trip inside the slab-ahead prefetch.
+struct Fetch32 {
+    int4 w;
+    unsigned s, b;
+};
+
+__device__ __forceinline__ size_t tile_at32(unsigned g, unsigned kg, unsigned col) {
+    return (static_cast<size_t>(col >> 4) * kg + g) * 16 + (col & 15);
+}
+
+__device__ __forceinline__ Fetch32 fetch_nt(const int4* __restrict__ words, const unsigned short* __restrict__ scales,
+                                            const unsigned short* __restrict__ biases, unsigned g, bool ok,
+                                            unsigned kg, unsigned col, unsigned half) {
+    Fetch32 f{make_int4(0, 0, 0, 0), 0u, 0u};
     if (ok) {
-        const size_t at = tile_at(g, kg, col);
+        const size_t at = tile_at32(g, kg, col);
         const int4v v = __builtin_nontemporal_load(reinterpret_cast<const int4v*>(words) + at * 2 + half);
         f.w = make_int4(v[0], v[1], v[2], v[3]);                  // read once a step: keep L2 for x and partials
         f.s = scales[at];
@@ -163,62 +176,76 @@ __device__ __forceinline__ Fetch fetch_nt(const int4* __restrict__ words, const 
 // order (reduce_kernel's arithmetic) and writes the output. counts[column block] returns to zero for the next call.
 // MT 16-row tiles share each weight fetch (a 32-row window reads the weights once); a tile's WMMA sequence is the
 // same with one tile or two, so a row's bits do not depend on which pass or tile holds it.
+// Index math is 32-bit unsigned (output and partial indices fit: at most 16 slices x 32 rows x N); a step's input
+// rows and group sums are loaded into registers a step ahead, before that step's weight prefetch (loads return in
+// order, so staging never waits on the weights' memory latency).
 template <int MT>
-__global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
-        const unsigned* __restrict__ x, int ldx2, int m, const float* __restrict__ xs, int kg, int gps, int slices,
-        const int4* __restrict__ words, const unsigned short* __restrict__ scales,
-        const unsigned short* __restrict__ biases, int n, float* __restrict__ part, void* __restrict__ out, bool f32,
+__global__ void __launch_bounds__(THREADS) wmma_kernel(
+        const unsigned* __restrict__ x, int ldx2, int m32, const float* __restrict__ xs, int kg32, int gps32,
+        int slices32, const int4* __restrict__ words, const unsigned short* __restrict__ scales,
+        const unsigned short* __restrict__ biases, int n32, float* __restrict__ part, void* __restrict__ out, bool f32,
         int* __restrict__ counts) {
-    __shared__ uint4 xsh[MT * 16][SLAB * 8 + 1];                // 8 bf16 a uint4; +1: rows off each other's banks
+    constexpr int XN = MT * 16 * SLAB * 8 / THREADS;           // uint4 a thread stages
+    __shared__ uint4 xsh[MT * 16][XROW];
     __shared__ float xssh[MT * 16][SLAB];
     __shared__ int last;
-    const int blocks = (n + COLS - 1) / COLS, items = blocks * slices;
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    const int h = lane >> 4, c = lane & 15;
-    int item = blockIdx.x;
+    const unsigned m = m32, kg = kg32, gps = gps32, slices = slices32, n = n32, ld = ldx2;
+    const unsigned blocks = (n + COLS - 1) / COLS, items = blocks * slices;
+    const unsigned tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const unsigned h = lane >> 4, c = lane & 15, lc = warp * 16 + c;
+    unsigned item = blockIdx.x;
     if (item >= items) return;
-    // the step after (item, gs) in this block's schedule: the next slab, else the next item's first
-    auto after = [&](int it, int gs, int& nit, int& ngs) {
-        const int g1 = min(kg, (it / blocks) * gps + gps);
-        if (gs + SLAB < g1) {
-            nit = it;
-            ngs = gs + SLAB;
-        } else {
-            nit = it + gridDim.x;
-            ngs = (nit / blocks) * gps;
-        }
-    };
-    auto column = [&](int it) { return (it % blocks) * COLS + warp * 16 + c; };
-    auto slab = [&](int it, int gs, Fetch (&f)[SLAB]) {
-        const int col = column(it), g1 = min(kg, (it / blocks) * gps + gps);
+    const unsigned nblocks = gridDim.x;
+    auto slab = [&](unsigned it, unsigned gs, Fetch32 (&f)[SLAB]) {
+        const unsigned col = (it % blocks) * COLS + lc, g1 = min(kg, (it / blocks) * gps + gps);
         const bool ok = it < items && col < n;
 #pragma unroll
         for (int j = 0; j < SLAB; ++j) f[j] = fetch_nt(words, scales, biases, gs + j, ok && gs + j < g1, kg, col, h);
     };
-    int gs = (item / blocks) * gps;
-    Fetch cur[SLAB], nxt[SLAB];
+    // the input rows (bf16 pairs, uint4 at a time) and group sums a thread stages for step (it, gs): zeros past m or
+    // the slice
+    uint4 xv[XN];
+    float sv;
+    auto stage = [&](unsigned it, unsigned gs) {
+        const unsigned groups = min(static_cast<unsigned>(SLAB), min(kg, (it / blocks) * gps + gps) - gs);
+#pragma unroll
+        for (int q = 0; q < XN; ++q) {
+            const unsigned i = tid + q * THREADS, r = i / (SLAB * 8), cc = i % (SLAB * 8);
+            xv[q] = r < m && cc < groups * 8
+                    ? *reinterpret_cast<const uint4*>(x + static_cast<size_t>(r) * ld + (gs * 32 + cc * 4))
+                    : make_uint4(0, 0, 0, 0);
+        }
+        const unsigned sr = tid / SLAB, scc = tid % SLAB;
+        sv = tid < MT * 16 * SLAB && sr < m && scc < groups ? xs[static_cast<size_t>(sr) * kg + gs + scc] : 0.0f;
+    };
+    unsigned gs = (item / blocks) * gps;
+    Fetch32 cur[SLAB], nxt[SLAB];
     slab(item, gs, cur);
     float8 acc[MT];
 #pragma unroll
     for (int t = 0; t < MT; ++t) acc[t] = float8{0, 0, 0, 0, 0, 0, 0, 0};
+    stage(item, gs);
     while (true) {
-        const int slice = item / blocks, g1 = min(kg, slice * gps + gps);
-        const int groups = min(SLAB, g1 - gs);
+        const unsigned slice = item / blocks, g1 = min(kg, slice * gps + gps);
+        const unsigned groups = min(static_cast<unsigned>(SLAB), g1 - gs);
         __syncthreads();                                        // the previous slab is consumed
-        for (int i = threadIdx.x; i < MT * 16 * SLAB * 8; i += blockDim.x) {
-            const int r = i / (SLAB * 8), cc = i % (SLAB * 8);
-            uint4 v = make_uint4(0, 0, 0, 0);
-            if (r < m && cc < groups * 8)
-                v = reinterpret_cast<const uint4*>(x + static_cast<size_t>(r) * ldx2 + gs * 32)[cc];
-            xsh[r][cc] = v;
+#pragma unroll
+        for (int q = 0; q < XN; ++q) {
+            const unsigned i = tid + q * THREADS;
+            xsh[i / (SLAB * 8)][i % (SLAB * 8)] = xv[q];
         }
-        if (threadIdx.x < MT * 16 * SLAB) {
-            const int r = threadIdx.x / SLAB, cc = threadIdx.x % SLAB;
-            xssh[r][cc] = r < m && cc < groups ? xs[static_cast<size_t>(r) * kg + gs + cc] : 0.0f;
-        }
+        if (tid < MT * 16 * SLAB) (&xssh[0][0])[tid] = sv;
         __syncthreads();
-        int nit, ngs;
-        after(item, gs, nit, ngs);
+        // the step after (item, gs) in this block's schedule: the next slab, else the next item's first
+        unsigned nit, ngs;
+        if (gs + SLAB < g1) {
+            nit = item;
+            ngs = gs + SLAB;
+        } else {
+            nit = item + nblocks;
+            ngs = (nit / blocks) * gps;
+        }
+        if (nit < items) stage(nit, ngs);                       // the next step's rows, before its weights
         slab(nit, ngs, nxt);                                    // the next step's reads, a slab ahead
         float8 p[MT][SLAB];
 #pragma unroll
@@ -226,7 +253,7 @@ __global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
 #pragma unroll
             for (int j = 0; j < SLAB; ++j) p[t][j] = float8{0, 0, 0, 0, 0, 0, 0, 0};
 #pragma unroll
-        for (int s = 0; s < 4; ++s)
+        for (int s = 0; s < 4; ++s) {
 #pragma unroll
             for (int j = 0; j < SLAB; ++j) {                    // independent chains: groups' WMMAs interleave
                 const unsigned word = s == 0 ? cur[j].w.x : s == 1 ? cur[j].w.y : s == 2 ? cur[j].w.z : cur[j].w.w;
@@ -238,6 +265,10 @@ __global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
                                                                                __builtin_bit_cast(short8, b), p[t][j]);
                 }
             }
+            // keep a K step's A reads with its WMMAs: hoisted all at once they hold 16 * MT uint4 (64 VGPRs a
+            // tile), which costs the one-tile kernel its second block per CU and spills the two-tile one
+            __builtin_amdgcn_sched_barrier(0);
+        }
 #pragma unroll
         for (int j = 0; j < SLAB; ++j) {                        // then the groups in order
             if (j < groups) {
@@ -248,14 +279,15 @@ __global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
                     for (int i = 0; i < 8; ++i)
                         acc[t][i] = fmaf(xssh[16 * t + 8 * h + i][j], bias, fmaf(p[t][j][i], sc, acc[t][i]));
             }
-            cur[j] = nxt[j];
         }
+#pragma unroll
+        for (int j = 0; j < SLAB; ++j) cur[j] = nxt[j];
         if (nit == item) {
             gs = ngs;
             continue;
         }
         // the item is done: its output, or its slice's sums and perhaps the column's
-        const int col = column(item);
+        const unsigned col = (item % blocks) * COLS + lc;
         const bool live = col < n;
         if (slices == 1) {
             if (live) {
@@ -263,11 +295,12 @@ __global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
                 for (int t = 0; t < MT; ++t)
 #pragma unroll
                     for (int i = 0; i < 8; ++i) {
-                        const int r = 16 * t + 8 * h + i;
-                        if (r >= m) break;
-                        const size_t at = static_cast<size_t>(r) * n + col;
-                        if (f32) static_cast<float*>(out)[at] = acc[t][i];
-                        else static_cast<unsigned short*>(out)[at] = bf16_round(acc[t][i]);
+                        const unsigned r = 16 * t + 8 * h + i;
+                        if (r < m) {
+                            const unsigned at = r * n + col;
+                            if (f32) static_cast<float*>(out)[at] = acc[t][i];
+                            else static_cast<unsigned short*>(out)[at] = bf16_round(acc[t][i]);
+                        }
                     }
             }
         } else {
@@ -276,15 +309,14 @@ __global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
                 for (int t = 0; t < MT; ++t)
 #pragma unroll
                     for (int i = 0; i < 8; ++i) {
-                        const int r = 16 * t + 8 * h + i;
-                        if (r >= m) break;
-                        part[(static_cast<size_t>(slice) * m + r) * n + col] = acc[t][i];
+                        const unsigned r = 16 * t + 8 * h + i;
+                        if (r < m) part[(slice * m + r) * n + col] = acc[t][i];
                     }
             }
             // release: this item's stores only (a full fence would also wait out the next item's prefetched loads)
             __builtin_amdgcn_fence(__ATOMIC_RELEASE, "agent");
             __syncthreads();
-            if (threadIdx.x == 0) last = atomicAdd(&counts[item % blocks], 1) == slices - 1;
+            if (tid == 0) last = static_cast<unsigned>(atomicAdd(&counts[item % blocks], 1)) == slices - 1;
             __syncthreads();
             if (last) {
                 __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
@@ -293,19 +325,19 @@ __global__ void __launch_bounds__(32 * WARPS) wmma_kernel(
                     for (int t = 0; t < MT; ++t)
 #pragma unroll
                         for (int i = 0; i < 8; ++i) {
-                            const int r = 16 * t + 8 * h + i;
-                            if (r >= m) break;
-                            float sum = __hip_atomic_load(&part[static_cast<size_t>(r) * n + col], __ATOMIC_RELAXED,
-                                                          __HIP_MEMORY_SCOPE_AGENT);
-                            for (int u = 1; u < slices; ++u)
-                                sum = sum + __hip_atomic_load(&part[(static_cast<size_t>(u) * m + r) * n + col],
-                                                              __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
-                            const size_t at = static_cast<size_t>(r) * n + col;
-                            if (f32) static_cast<float*>(out)[at] = sum;
-                            else static_cast<unsigned short*>(out)[at] = bf16_round(sum);
+                            const unsigned r = 16 * t + 8 * h + i;
+                            if (r < m) {
+                                const unsigned at = r * n + col;
+                                float sum = __hip_atomic_load(&part[at], __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+                                for (unsigned u = 1; u < slices; ++u)
+                                    sum = sum + __hip_atomic_load(&part[(u * m + r) * n + col], __ATOMIC_RELAXED,
+                                                                  __HIP_MEMORY_SCOPE_AGENT);
+                                if (f32) static_cast<float*>(out)[at] = sum;
+                                else static_cast<unsigned short*>(out)[at] = bf16_round(sum);
+                            }
                         }
                 }
-                if (threadIdx.x == 0) counts[item % blocks] = 0;
+                if (tid == 0) counts[item % blocks] = 0;
             }
         }
         item = nit;
