@@ -16,7 +16,7 @@
 from std.sys import llvm_intrinsic
 from std.memory import bitcast, stack_allocation
 from std.utils import StaticTuple
-from max.gpu import thread_idx, block_idx, block_dim, barrier, MAX_THREADS_PER_BLOCK_METADATA
+from max.gpu import thread_idx, block_idx, block_dim, grid_dim, barrier, MAX_THREADS_PER_BLOCK_METADATA
 from max.gpu.memory import AddressSpace
 from max.gpu.host import DeviceContext
 
@@ -198,8 +198,10 @@ def put_v16(t: SPtr, i: UInt32, x: SIMD[U32, 8]):
 
 # The pieces of tile ``key0`` a thread loads: bf16 (KV8 False) 8 values a piece, packed 16 bytes and the row's
 # exponent; the first ``M`` of N pieces of K and as many of V, piece j at ``i0 + j * step``.
+# BOUND (prompt keys): keys past ``last`` read key ``last``'s row instead of attention_rocm.cu's zeros. Their scores
+# are masked to -inf and their probabilities are 0, so a finite row adds exact zeros to every sum: the same bits.
 @always_inline
-def fetch_c[KV8: Bool, N: Int, M: Int](
+def fetch_c[KV8: Bool, N: Int, M: Int, BOUND: Bool = False](
     mut kr: SIMD[U32, 4 * N],
     mut vr: SIMD[U32, 4 * N],
     mut ke: SIMD[DType.int32, N],
@@ -210,24 +212,35 @@ def fetch_c[KV8: Bool, N: Int, M: Int](
     key0: UInt32,
     i0: UInt32,
     step: UInt32,
+    last: UInt32 = 0,
 ):
     comptime for j in range(M):
         var i = i0 + UInt32(j) * step
+        var kk: UInt32
+        var vk: UInt32
+        comptime if KV8:
+            kk = key0 + (i >> 4)
+        else:
+            kk = key0 + (i >> 5)
+        vk = key0 + (i & 15)
+        comptime if BOUND:
+            kk = min(kk, last)
+            vk = min(vk, last)
         comptime if KV8:
             var kb = kc.bitcast[UInt8]()
             var vb = vc.bitcast[UInt8]()
-            var krow = (key0 + (i >> 4)) * stride
-            var vrow = (key0 + (i & 15)) * stride
+            var krow = kk * stride
+            var vrow = vk * stride
             kr = kr.insert[offset=4 * j](ld4b[KV_NT](kb, krow + (i & 15) * 16))
             ke[j] = exponent(kb, krow + D)
             vr = vr.insert[offset=4 * j](ld4b[KV_NT](vb, vrow + (i >> 4) * 16))
             ve[j] = exponent(vb, vrow + D)
         else:
-            kr = kr.insert[offset=4 * j](ld4[KV_NT](kc, (key0 + (i >> 5)) * stride + (i & 31) * 8))
+            kr = kr.insert[offset=4 * j](ld4[KV_NT](kc, kk * stride + (i & 31) * 8))
             comptime if V_TR:
-                vr = vr.insert[offset=4 * j](ld4_tr(vc, (key0 + (i & 15)) * stride + (i >> 4) * 8))
+                vr = vr.insert[offset=4 * j](ld4_tr(vc, vk * stride + (i >> 4) * 8))
             else:
-                vr = vr.insert[offset=4 * j](ld4[KV_NT](vc, (key0 + (i & 15)) * stride + (i >> 4) * 8))
+                vr = vr.insert[offset=4 * j](ld4[KV_NT](vc, vk * stride + (i >> 4) * 8))
 
 
 @always_inline
@@ -258,8 +271,8 @@ def place_c[KV8: Bool, N: Int, M: Int](
 # loading and placing its own pieces (registers merged across branches cost the bf16 kernel its query registers);
 # packed: a branch per piece (the per-count form spills there).
 @always_inline
-def stage_batch[KV8: Bool, N: Int](t: SPtr, kc: U16Ptr, vc: U16Ptr, stride: UInt32, key0: UInt32, i0: UInt32,
-                                   step: UInt32, limit: UInt32):
+def stage_batch[KV8: Bool, N: Int, BOUND: Bool = False](t: SPtr, kc: U16Ptr, vc: U16Ptr, stride: UInt32, key0: UInt32,
+                                                       i0: UInt32, step: UInt32, limit: UInt32, last: UInt32 = 0):
     var w0 = uniform(i0)
     comptime if KV8:
         var kr = SIMD[U32, 4 * N](0)
@@ -272,7 +285,7 @@ def stage_batch[KV8: Bool, N: Int](t: SPtr, kc: U16Ptr, vc: U16Ptr, stride: UInt
                 var v1 = SIMD[U32, 4](0)
                 var e1 = SIMD[DType.int32, 1](0)
                 var f1 = SIMD[DType.int32, 1](0)
-                fetch_c[KV8, 1, 1](k1, v1, e1, f1, kc, vc, stride, key0, i0 + UInt32(j) * step, step)
+                fetch_c[KV8, 1, 1, BOUND](k1, v1, e1, f1, kc, vc, stride, key0, i0 + UInt32(j) * step, step, last)
                 kr = kr.insert[offset=4 * j](k1)
                 vr = vr.insert[offset=4 * j](v1)
                 ke[j] = e1[0]
@@ -293,13 +306,13 @@ def stage_batch[KV8: Bool, N: Int](t: SPtr, kc: U16Ptr, vc: U16Ptr, stride: UInt
             var vr = SIMD[U32, 4 * N](0)
             var ke = SIMD[DType.int32, N](0)
             var ve = SIMD[DType.int32, N](0)
-            fetch_c[KV8, N, n](kr, vr, ke, ve, kc, vc, stride, key0, i0, step)
+            fetch_c[KV8, N, n, BOUND](kr, vr, ke, ve, kc, vc, stride, key0, i0, step, last)
             place_c[KV8, N, n](t, kr, vr, ke, ve, i0, step)
 
 
 # A loader thread's register set S of R: one tile's N pieces of K and of V (pipelined loaders).
 @always_inline
-def fetch_set[KV8: Bool, N: Int, R: Int, S: Int](
+def fetch_set[KV8: Bool, N: Int, R: Int, S: Int, BOUND: Bool = False](
     mut kr: SIMD[U32, 4 * N * R],
     mut vr: SIMD[U32, 4 * N * R],
     mut ke: SIMD[DType.int32, N * R],
@@ -309,12 +322,13 @@ def fetch_set[KV8: Bool, N: Int, R: Int, S: Int](
     stride: UInt32,
     key0: UInt32,
     lt: UInt32,
+    last: UInt32 = 0,
 ):
     var k = SIMD[U32, 4 * N](0)
     var v = SIMD[U32, 4 * N](0)
     var e = SIMD[DType.int32, N](0)
     var f = SIMD[DType.int32, N](0)
-    fetch_c[KV8, N, N](k, v, e, f, kc, vc, stride, key0, lt, UInt32(NL))
+    fetch_c[KV8, N, N, BOUND](k, v, e, f, kc, vc, stride, key0, lt, UInt32(NL), last)
     kr = kr.insert[offset=4 * N * S](k)
     vr = vr.insert[offset=4 * N * S](v)
     comptime if KV8:
@@ -784,6 +798,247 @@ def merge(po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: 
     (dst + at).bitcast[UInt32]().store[alignment=8](packed)
 
 
+# Prompt attention (attention_rocm.cu's prompt_kernel): q (W, H, D), caches (T, HK, D) bf16 or (T, HK, ROW8) packed
+# holding keys [0, p0 + W), dst (W, H, D). A block per 16 rb query rows and KV head (the longest causal blocks
+# first), a compute wave per 16 rows and query head (g heads a KV head: g rb compute waves); PIPE: four loader waves
+# fill a double buffer (attention_rocm.cu's load_tiles: two tiles in registers, one barrier a tile), else every wave
+# stages each tile. A row's keys stop at its own position; none of these change a row's bits.
+@always_inline
+def prompt_body[PIPE: Bool, KV8: Bool](
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0_32: Int32, w32: Int32, h32: Int32, hk_count: Int32,
+    g32: Int32, rb32: Int32, scale: Float32,
+):
+    comptime NT = 2 if PIPE else 1
+    var tb = stack_allocation[NT * TILE, UInt32, alignment=16, address_space=AddressSpace.SHARED]()
+    var tb1 = tb + (TILE if PIPE else 0)
+    var tid = UInt32(thread_idx.x)
+    var bd = UInt32(block_dim.x)
+    var p0 = UInt32(p0_32)
+    var w = UInt32(w32)
+    var h = UInt32(h32)
+    var g = UInt32(g32)
+    var rb = UInt32(rb32)
+    var cw = g * rb
+    var r0 = (UInt32(grid_dim.x) - 1 - UInt32(block_idx.x)) * 16 * rb
+    var kvh = UInt32(block_idx.y)
+    var wave = tid >> 5
+    var nt = (p0 + min(r0 + 16 * rb, w) - 1) // 16 + 1
+    var last = p0 + w - 1  # the last key
+    var kb: U16Ptr
+    var vb: U16Ptr
+    var stride: UInt32
+    comptime if KV8:
+        kb = (kc.bitcast[UInt8]() + Int(kvh * ROW8)).bitcast[UInt16]()
+        vb = (vc.bitcast[UInt8]() + Int(kvh * ROW8)).bitcast[UInt16]()
+        stride = UInt32(hk_count) * ROW8
+    else:
+        kb = kc + Int(kvh * D)
+        vb = vc + Int(kvh * D)
+        stride = UInt32(hk_count) * D
+    comptime P = P8 if KV8 else P16
+    comptime if PIPE:
+        if wave >= cw:  # load_tiles: tile kt in buffer kt % 2 while tile kt + 1 is placed and kt + 3 fetched
+            comptime N = P // NL
+            var lt = tid - 32 * cw
+            var kr = SIMD[U32, 8 * N](0)
+            var vr = SIMD[U32, 8 * N](0)
+            var ke = SIMD[DType.int32, 2 * N](0)
+            var ve = SIMD[DType.int32, 2 * N](0)
+            fetch_set[KV8, N, 2, 0, True](kr, vr, ke, ve, kb, vb, stride, 0, lt, last)
+            if nt > 1:
+                fetch_set[KV8, N, 2, 1, True](kr, vr, ke, ve, kb, vb, stride, 16, lt, last)
+            place_set[KV8, N, 2, 0](tb, kr, vr, ke, ve, lt)
+            if nt > 2:
+                fetch_set[KV8, N, 2, 0, True](kr, vr, ke, ve, kb, vb, stride, 32, lt, last)
+            barrier()
+            var kt = UInt32(0)
+            while kt < nt:
+                if kt + 1 < nt:
+                    place_set[KV8, N, 2, 1](tb1, kr, vr, ke, ve, lt)
+                    if kt + 3 < nt:
+                        fetch_set[KV8, N, 2, 1, True](kr, vr, ke, ve, kb, vb, stride, 16 * (kt + 3), lt, last)
+                barrier()
+                if kt + 1 >= nt:
+                    break
+                if kt + 2 < nt:
+                    place_set[KV8, N, 2, 0](tb, kr, vr, ke, ve, lt)
+                    if kt + 4 < nt:
+                        fetch_set[KV8, N, 2, 0, True](kr, vr, ke, ve, kb, vb, stride, 16 * (kt + 4), lt, last)
+                barrier()
+                kt += 2
+            return
+    var lane = tid & 31
+    var c = lane & 15
+    var half = lane >> 4
+    var rows0 = r0 + 16 * (wave // g)
+    var head = kvh * g + wave % g
+    var live = rows0 < w  # wave-uniform
+    var row = rows0 + c
+    var pos = p0 + row
+    var qb = query(q, min(row, w - 1) * h + head, live, half)
+    var o = SIMD[F32, 128](0)
+    var m = neg_inf()
+    var l = Float32(0.0)
+    comptime if PIPE:
+        barrier()
+        var kt = UInt32(0)
+        while kt < nt:
+            if live:
+                fold(tb, qb, o, m, l, prompt_valid(row, w, pos, 16 * kt), scale, c, half)
+            barrier()
+            if kt + 1 >= nt:
+                break
+            if live:
+                fold(tb1, qb, o, m, l, prompt_valid(row, w, pos, 16 * (kt + 1)), scale, c, half)
+            barrier()
+            kt += 2
+    else:
+        comptime N = 4 if not KV8 else 2  # attention_rocm.cu's Stage16::B, Stage8::B
+        for kt in range(Int(nt)):
+            barrier()  # the previous tile is consumed
+            var k0 = UInt32(16 * kt)
+            var b = UInt32(0)
+            while b < UInt32(P):
+                stage_batch[KV8, N, True](tb, kb, vb, stride, k0, b + tid, bd, UInt32(P), last)
+                b += UInt32(N) * bd
+            barrier()
+            if live:
+                fold(tb, qb, o, m, l, prompt_valid(row, w, pos, k0), scale, c, half)
+    if not live:
+        return
+    comptime for i in range(8):
+        var li = shfl(l, 8 * half + UInt32(i))
+        var r = rows0 + 8 * half + UInt32(i)
+        if r < w:
+            var at = (Int(r) * Int(h) + Int(head)) * D + Int(c)
+            comptime for n in range(16):
+                dst[at + 16 * n] = UInt16(bf16_round(o[8 * n + i] / li))
+
+
+# Keys of tile ``key0`` at or before this lane's row (bit j: key key0 + j), none for rows past W.
+@always_inline
+def prompt_valid(row: UInt32, w: UInt32, pos: UInt32, key0: UInt32) -> UInt32:
+    if row >= w or pos < key0:
+        return 0
+    return UInt32(0xFFFF) if pos >= key0 + 15 else (UInt32(2) << (pos - key0)) - 1
+
+
+# prompt_{p: loaders, f: none}{waves a block}{b: bf16, k: packed caches}: one code object a block size (8, 12, 16 or
+# 20 waves), the launcher taking the smallest that holds its block. A kernel bounded at the block it runs schedules
+# for that occupancy (bounded at 640 threads, a 512-thread block measured 5-8% slower). Names stay short: longer ones
+# lose the separator in the symbol cuda/mojo.py matches.
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
+def prompt_p8b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
+def prompt_p8k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](384))
+def prompt_p12b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](384))
+def prompt_p12k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](512))
+def prompt_p16b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](512))
+def prompt_p16k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](640))
+def prompt_p20b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](640))
+def prompt_p20k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[True, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
+def prompt_f8b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[False, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
+def prompt_f8k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[False, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](384))
+def prompt_f12b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[False, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](384))
+def prompt_f12k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[False, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](512))
+def prompt_f16b(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[False, False](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](512))
+def prompt_f16k(
+    q: U16Ptr, kc: U16Ptr, vc: U16Ptr, dst: U16Ptr, p0: Int32, w: Int32, h: Int32, hk_count: Int32, g: Int32,
+    rb: Int32, scale: Float32,
+):
+    prompt_body[False, True](q, kc, vc, dst, p0, w, h, hk_count, g, rb, scale)
+
+
 @export
 def tf_attention_instantiate(a: Int) abi("C") -> Int:
     try:
@@ -801,6 +1056,20 @@ def tf_attention_instantiate(a: Int) abi("C") -> Int:
         ctx.enqueue_function[tail16](u, u, u, u, o, i, i, i, i, f, f, f, z, z, z, z, z, x, grid_dim=1, block_dim=NL + 32)
         ctx.enqueue_function[tail8](u, u, u, u, o, i, i, i, i, f, f, f, z, z, z, z, z, x, grid_dim=1, block_dim=NL + 32)
         ctx.enqueue_function[merge](f, f, f, u, i, i, z, z, grid_dim=1, block_dim=64 * MERGE_HEADS)
+        ctx.enqueue_function[prompt_p8b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p8k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p12b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p12k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p16b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p16k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p20b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_p20k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_f8b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_f8k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_f12b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_f12k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_f16b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
+        ctx.enqueue_function[prompt_f16k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
         return 0
     except:
         return 1

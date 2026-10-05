@@ -218,8 +218,8 @@ def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
 
 @lru_cache(maxsize=1)
 def _mojo():
-    """The Mojo tree attention's launcher with its kernels loaded: ``attention_rocm.mojo`` built to code objects at
-    first use (cached by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
+    """The Mojo attention's launcher (tree and prompt) with its kernels loaded: ``attention_rocm.mojo`` built to code
+    objects at first use (cached by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
 
     from pathlib import Path
 
@@ -228,11 +228,13 @@ def _mojo():
 
     here = Path(__file__).parent
     built, manifest = build_hsaco(here / "attention_rocm.mojo", hip_arch())
-    ext = load(name="tensorfold_attention_rocm_mojo_v1", sources=[str(here / "attention_rocm_mojo.cpp"),
+    ext = load(name="tensorfold_attention_rocm_mojo_v2", sources=[str(here / "attention_rocm_mojo.cpp"),
                                                                  str(here / "attention_rocm_mojo.cu")],
                extra_cuda_cflags=["-O3"], verbose=False)
     k = {e["name"]: e for e in manifest["kernels"]}
-    names = ("shared_pipe", "shared_pipe8", "shared_flat", "shared_flat8", "tail16", "tail8", "merge")
+    names = ("shared_pipe", "shared_pipe8", "shared_flat", "shared_flat8", "tail16", "tail8", "merge",
+             *(f"prompt_{kind}{waves}{fmt}" for kind, sizes in (("p", (8, 12, 16, 20)), ("f", (8, 12, 16)))
+               for waves in sizes for fmt in ("b", "k")))
     ext.load_kernels([str(built / k[n]["hsaco"]) for n in names], [k[n]["symbol"] for n in names])
     return ext
 

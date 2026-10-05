@@ -31,7 +31,9 @@ constexpr int MERGE_HEADS = 4;              // attention_rocm.mojo's MERGE_HEADS
         TORCH_CHECK(e_ == hipSuccess, #x, ": ", hipGetErrorString(e_));                         \
     } while (0)
 
-enum { SHARED_PIPE, SHARED_PIPE8, SHARED_FLAT, SHARED_FLAT8, TAIL16, TAIL8, MERGE, KERNELS };
+// the prompt kernels follow MERGE, one a (loaders or not, block size, cache format): prompt_p{8,12,16,20}{b,k}
+// then prompt_f{8,12,16}{b,k} (waves a block; bf16, then packed caches)
+enum { SHARED_PIPE, SHARED_PIPE8, SHARED_FLAT, SHARED_FLAT8, TAIL16, TAIL8, MERGE, PROMPT, KERNELS = PROMPT + 14 };
 
 std::vector<hipFunction_t>& kernels() {
     static std::vector<hipFunction_t> k;
@@ -65,13 +67,16 @@ bool tree_supported(int heads, int kv_heads, int dim) {
     return dim == D && kv_heads > 0 && heads % kv_heads == 0 && heads / kv_heads <= 16;
 }
 
+constexpr int ROW8 = D + 16;                // a packed FP8 row: 256 e4m3 bytes, the int8 exponent, padding
+
 }  // namespace
 
-// paths and symbols in the order shared_pipe, shared_pipe8, shared_flat, shared_flat8, tail16, tail8, merge
+// paths and symbols in the order shared_pipe, shared_pipe8, shared_flat, shared_flat8, tail16, tail8, merge, then
+// the prompt kernels (see PROMPT)
 void load_kernels(const std::vector<std::string>& paths, const std::vector<std::string>& symbols) {
     auto& k = kernels();
     if (!k.empty()) return;
-    TORCH_CHECK(paths.size() == KERNELS && symbols.size() == KERNELS, "the Mojo tree attention has 7 kernels");
+    TORCH_CHECK(paths.size() == KERNELS && symbols.size() == KERNELS, "the Mojo attention has 21 kernels");
     std::vector<hipFunction_t> loaded;
     for (size_t i = 0; i < paths.size(); ++i) loaded.push_back(load_one(paths[i], symbols[i]));
     k = loaded;
@@ -140,4 +145,33 @@ void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl
     void* rp = rows.data_ptr<int>();
     void* args[] = {&pop, &pmp, &plp, &outp, &sp, &rp, &w, &h};
     if (w > 0) launch(kernel(MERGE), dim3(w, (h + MERGE_HEADS - 1) / MERGE_HEADS), 64 * MERGE_HEADS, args);
+}
+
+bool prompt_supported(int heads, int kv_heads, int dim) {   // attention_rocm.cu's attention_supported
+    const int g = kv_heads > 0 && heads % kv_heads == 0 ? heads / kv_heads : 0;
+    return dim == D && (g == 1 || g == 2 || g == 4 || g == 6 || g == 8);
+}
+
+// attention_rocm.cu's prompt_attention: q (W, H, 256), caches (T, HK, 256) bf16 or (T, HK, 272) packed FP8 rows
+// holding keys through p0 + W - 1, out (W, H, 256), contiguous; its grid (row blocks, KV heads) and blocks (G rb
+// compute waves, four loader waves with ``pipe``).
+void prompt_attention(const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache, at::Tensor& out,
+                      int p0, double scale, int rb, bool pipe) {
+    int w = q.size(0), h = q.size(1), hk = k_cache.size(1);
+    const bool kv8 = k_cache.scalar_type() == at::kByte;
+    TORCH_CHECK(prompt_supported(h, hk, q.size(2)) && (rb == 1 || rb == 2) && k_cache.size(2) == (kv8 ? ROW8 : D) &&
+                v_cache.scalar_type() == k_cache.scalar_type(),
+                "ROCm prompt attention: head size 256, 1-8 heads a KV head, bf16 or packed FP8 caches");
+    if (w == 0) return;
+    int g = h / hk;
+    void* qp = q.data_ptr();
+    void* kp = k_cache.data_ptr();
+    void* vp = v_cache.data_ptr();
+    void* op = out.data_ptr();
+    float sc = static_cast<float>(scale);
+    void* args[] = {&qp, &kp, &vp, &op, &p0, &w, &h, &hk, &g, &rb, &sc};
+    const int waves = g * rb + (pipe ? LOADERS : 0);           // at most 20 with loaders, 16 without
+    const int size = waves <= 8 ? 0 : waves <= 12 ? 1 : waves <= 16 ? 2 : 3;  // the smallest code object holding it
+    hipFunction_t fn = kernel(PROMPT + (pipe ? 0 : 8) + 2 * size + (kv8 ? 1 : 0));
+    launch(fn, dim3((w + 16 * rb - 1) / (16 * rb), hk), 32 * waves, args);
 }
