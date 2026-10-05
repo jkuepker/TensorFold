@@ -71,6 +71,29 @@ int gpu_of(const at::Tensor& t) {
     return device;
 }
 
+// A kernel's explicit argument sizes (bytes, from its manifest) must be the ones its launch passes: a kernel argument
+// widened in the .mojo source while the launcher still passes the narrower one would read past it unnoticed.
+constexpr int kPtr = sizeof(void*), kInt = sizeof(int), kFloat = sizeof(float);
+
+void check_args(const std::string& symbol, const std::vector<int>& reads, const std::vector<int>& passed) {
+    if (reads == passed) return;
+    auto text = [](const std::vector<int>& v) {
+        std::string s;
+        for (int x : v) s += (s.empty() ? "" : ",") + std::to_string(x);
+        return s;
+    };
+    TORCH_CHECK(false, "Mojo kernel ", symbol, " reads arguments of [", text(reads), "] bytes, its launcher passes [",
+                text(passed), "]: the .mojo source and its launcher disagree");
+}
+
+// the arguments each kernel kind's launch below passes, in order
+const std::vector<int> SHARED_ARGS = {
+    kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kInt, kInt, kInt, kInt, kFloat, kInt};
+const std::vector<int> TAIL_ARGS = {
+    kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kInt, kInt, kInt, kInt, kInt, kFloat};
+const std::vector<int> MERGE_ARGS = {kPtr, kPtr, kPtr, kPtr, kPtr, kPtr, kInt, kInt};
+const std::vector<int> PROMPT_ARGS = {kPtr, kPtr, kPtr, kPtr, kInt, kInt, kInt, kInt, kInt, kInt, kFloat};
+
 hipFunction_t load_one(const std::string& path, const std::string& symbol) {
     std::ifstream f(path, std::ios::binary);
     TORCH_CHECK(f.good(), "cannot read ", path);
@@ -105,10 +128,17 @@ constexpr int ROW8 = D + 16;                // a packed FP8 row: 256 e4m3 bytes,
 
 // paths and symbols in the order shared_pipe, shared_pipe8, shared_flat, shared_flat8, tail16, tail8, merge, then
 // the prompt kernels (see PROMPT)
-void load_kernels(int device, const std::vector<std::string>& paths, const std::vector<std::string>& symbols) {
+// args: each kernel's explicit argument sizes from the manifest
+void load_kernels(int device, const std::vector<std::string>& paths, const std::vector<std::string>& symbols,
+                  const std::vector<std::vector<int>>& args) {
     TORCH_CHECK(device >= 0 && device < MAX_GPUS, "GPU ", device, ": the Mojo attention takes ", MAX_GPUS,
                 " at most");
-    TORCH_CHECK(paths.size() == KERNELS && symbols.size() == KERNELS, "the Mojo attention has 21 kernels");
+    TORCH_CHECK(paths.size() == KERNELS && symbols.size() == KERNELS && args.size() == KERNELS,
+                "the Mojo attention has 21 kernels");
+    for (int i = 0; i < KERNELS; ++i) {
+        check_args(symbols[i], args[i], i < TAIL16 ? SHARED_ARGS : i < MERGE ? TAIL_ARGS : i == MERGE ? MERGE_ARGS
+                                                                                                      : PROMPT_ARGS);
+    }
     Kernels& k = g_kernels[device];
     std::lock_guard<std::mutex> lock(g_load);
     if (k.ready.load(std::memory_order_relaxed)) return;

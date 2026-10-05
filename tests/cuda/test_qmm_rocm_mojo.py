@@ -115,6 +115,23 @@ def test_mojo_lane_needs_no_hip_extension(monkeypatch):
     assert torch.equal(got, qmm_groups.gemv(x, *g, 1024, wmma=True))
 
 
+def test_mojo_launcher_refuses_other_argument_sizes():
+    """A kernel whose manifest lists other argument sizes than its launch passes is refused at load."""
+
+    from pathlib import Path
+
+    from tensorfold.cuda.build import hip_arch
+
+    built, manifest = mojo.build_hsaco(Path(qmm_groups.__file__).parent / "qmm_rocm.mojo", hip_arch())
+    one, two = mojo.kernels(manifest, ("wmma_mt1", "wmma_mt2"))
+    sizes = mojo.arg_sizes(one)
+    assert sizes == mojo.arg_sizes(two) and len(sizes) == 16
+    wrong = sizes[:1] + [8] + sizes[2:]                     # ldx2 widened to 64 bits
+    with pytest.raises(RuntimeError, match="disagree"):
+        qmm_groups._mojo_ext().load_kernels(torch.cuda.current_device(), str(built / one["hsaco"]), one["symbol"],
+                                            wrong, str(built / two["hsaco"]), two["symbol"], sizes)
+
+
 def test_missing_mojo_says_so(monkeypatch):
     monkeypatch.delenv("TF_MOJO", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: None)

@@ -3,7 +3,8 @@
 #include <string>
 #include <vector>
 
-void load_kernels(int device, const std::vector<std::string>& paths, const std::vector<std::string>& symbols);
+void load_kernels(int device, const std::vector<std::string>& paths, const std::vector<std::string>& symbols,
+                  const std::vector<std::vector<int>>& args);
 void tree_shared(const at::Tensor& q, const at::Tensor& base, const at::Tensor& offs, const at::Tensor& streams,
                  const at::Tensor& items, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int hk, int cw, bool pipe,
                  double scale, bool kv8);

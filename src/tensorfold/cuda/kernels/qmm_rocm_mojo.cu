@@ -76,6 +76,25 @@ const Kernels& kernels(int device) {
     return k;
 }
 
+// A kernel's explicit argument sizes (bytes, from its manifest) must be the ones its launch passes: a kernel argument
+// widened in the .mojo source while the launcher still passes the narrower one would read past it unnoticed.
+constexpr int kPtr = sizeof(void*), kInt = sizeof(int), kFloat = sizeof(float);
+
+void check_args(const std::string& symbol, const std::vector<int>& reads, const std::vector<int>& passed) {
+    if (reads == passed) return;
+    auto text = [](const std::vector<int>& v) {
+        std::string s;
+        for (int x : v) s += (s.empty() ? "" : ",") + std::to_string(x);
+        return s;
+    };
+    TORCH_CHECK(false, "Mojo kernel ", symbol, " reads arguments of [", text(reads), "] bytes, its launcher passes [",
+                text(passed), "]: the .mojo source and its launcher disagree");
+}
+
+// the arguments gemv_groups' launch passes, in order (both tile kernels)
+const std::vector<int> WMMA_ARGS = {
+    kPtr, kInt, kInt, kPtr, kInt, kInt, kInt, kPtr, kPtr, kPtr, kInt, kPtr, kPtr, kInt, kPtr, kInt};
+
 hipFunction_t load_one(const std::string& path, const std::string& symbol) {
     std::ifstream f(path, std::ios::binary);
     TORCH_CHECK(f.good(), "cannot read ", path);
@@ -109,10 +128,13 @@ void launch(hipFunction_t fn, int device, int grid, int block, void** args) {
 
 }  // namespace
 
-void load_kernels(int device, const std::string& mt1, const std::string& mt1_symbol, const std::string& mt2,
-                  const std::string& mt2_symbol) {
+// mt1_args, mt2_args: the kernels' explicit argument sizes from the manifest
+void load_kernels(int device, const std::string& mt1, const std::string& mt1_symbol, const std::vector<int>& mt1_args,
+                  const std::string& mt2, const std::string& mt2_symbol, const std::vector<int>& mt2_args) {
     TORCH_CHECK(device >= 0 && device < MAX_GPUS, "GPU ", device, ": the Mojo lane matmul takes ", MAX_GPUS,
                 " at most");
+    check_args(mt1_symbol, mt1_args, WMMA_ARGS);
+    check_args(mt2_symbol, mt2_args, WMMA_ARGS);
     Kernels& k = g_kernels[device];
     std::lock_guard<std::mutex> lock(g_load);
     if (k.ready.load(std::memory_order_relaxed)) return;

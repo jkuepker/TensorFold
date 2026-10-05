@@ -238,7 +238,7 @@ def _mojo(device: int):
     from pathlib import Path
 
     from tensorfold.cuda.build import hip_arch
-    from tensorfold.cuda.mojo import build_hsaco, kernels
+    from tensorfold.cuda.mojo import arg_sizes, build_hsaco, kernels
 
     built, manifest = build_hsaco(Path(__file__).parent / "attention_rocm.mojo", hip_arch(device))
     ext = _mojo_ext()
@@ -246,7 +246,7 @@ def _mojo(device: int):
              *(f"prompt_{kind}{waves}{fmt}" for kind, sizes in (("p", (8, 12, 16, 20)), ("f", (8, 12, 16)))
                for waves in sizes for fmt in ("b", "k")))
     k = kernels(manifest, names)
-    ext.load_kernels(device, [str(built / e["hsaco"]) for e in k], [e["symbol"] for e in k])
+    ext.load_kernels(device, [str(built / e["hsaco"]) for e in k], [e["symbol"] for e in k], [arg_sizes(e) for e in k])
     return ext
 
 

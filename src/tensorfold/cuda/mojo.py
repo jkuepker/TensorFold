@@ -87,6 +87,12 @@ def kernels(manifest: dict, names: list[str] | tuple[str, ...]) -> list[dict]:
     return [have[n] for n in names]
 
 
+def arg_sizes(entry: dict) -> list[int]:
+    """A manifest entry's explicit argument sizes in bytes, in order (the launchers check them against their own)."""
+
+    return [a["size"] for a in entry["explicit_args"]]
+
+
 def _build_root() -> Path:
     from torch.utils import cpp_extension
 

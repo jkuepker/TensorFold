@@ -4,7 +4,8 @@
 #include <vector>
 
 void load_kernels(int device, const std::vector<std::string>& paths, const std::vector<std::string>& symbols,
-                  const std::vector<int>& bm, const std::vector<int>& bn, const std::vector<int>& threads);
+                  const std::vector<int>& bm, const std::vector<int>& bn, const std::vector<int>& threads,
+                  const std::vector<std::vector<int>>& args);
 void gemm(const at::Tensor& x, const at::Tensor& w, at::Tensor& out, int which);
 void gemm8(const at::Tensor& x8, const at::Tensor& xs, const at::Tensor& a, const at::Tensor& w8,
            const at::Tensor& scales, const at::Tensor& biases, at::Tensor& out, int which);

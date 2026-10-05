@@ -1,9 +1,10 @@
 #include <torch/extension.h>
 
 #include <string>
+#include <vector>
 
-void load_kernels(int device, const std::string& mt1, const std::string& mt1_symbol, const std::string& mt2,
-                  const std::string& mt2_symbol);
+void load_kernels(int device, const std::string& mt1, const std::string& mt1_symbol, const std::vector<int>& mt1_args,
+                  const std::string& mt2, const std::string& mt2_symbol, const std::vector<int>& mt2_args);
 void gemv_groups(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& words, const at::Tensor& scales,
                  const at::Tensor& biases, int n, at::Tensor& out, at::Tensor& part, int fill, at::Tensor& counts);
 int wmma_slices(int kg, int n, int fill);
