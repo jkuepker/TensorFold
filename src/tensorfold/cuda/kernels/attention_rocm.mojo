@@ -783,8 +783,13 @@ def tail8(
 # attention.py's Triton _merge: a row's chunks in key order, each output column's fold its own and every column of a
 # head recomputing m and l alike. A block takes MERGE_HEADS (row, head) pairs, 64 threads a pair, 4 columns a thread
 # (grid (W, ceil(H / MERGE_HEADS))); the arithmetic per element is _merge's as Triton compiles it.
-@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](64 * MERGE_HEADS))
-def merge(po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: IPtr, w: Int32, h: Int32):
+# CO_FIRST: Triton contracts the column fold o * a + co * b as fma(o, a, b * co) where G < 16 masks the head rows, and
+# as fma(co, b, o * a) at G = 16 (no mask: the backend schedules the multiplies the other way); l is fma(cl, b, l * a)
+# in both. ``merge16`` is the G = 16 form.
+@always_inline
+def merge_body[CO_FIRST: Bool](
+    po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: IPtr, w: Int32, h: Int32
+):
     var node = UInt32(block_idx.x)
     var tid = UInt32(thread_idx.x)
     var head = UInt32(block_idx.y) * MERGE_HEADS + (tid >> 6)
@@ -808,7 +813,10 @@ def merge(po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: 
         var a = (Float32(0.0) if m == NEG else triton_exp(m - next)) if active else Float32(1.0)
         var b = triton_exp(cm - next) if active else Float32(0.0)
         comptime for i in range(4):
-            o[i] = o[i].fma(a, b * co[i])
+            comptime if CO_FIRST:
+                o[i] = co[i].fma(b, o[i] * a)
+            else:
+                o[i] = o[i].fma(a, b * co[i])
         l = cl.fma(b, l * a)
         m = next
     var r = SIMD[U32, 4](0)
@@ -818,6 +826,16 @@ def merge(po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: 
     var at = (Int(node) * Int(h) + Int(head)) * D + Int(col)
     var packed = SIMD[U32, 2](r[0] | (r[1] << 16), r[2] | (r[3] << 16))
     (dst + at).bitcast[UInt32]().store[alignment=8](packed)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](64 * MERGE_HEADS))
+def merge(po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: IPtr, w: Int32, h: Int32):
+    merge_body[False](po, pm, pl, dst, streams, row_stream, w, h)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](64 * MERGE_HEADS))
+def merge16(po: FPtr, pm: FPtr, pl: FPtr, dst: U16Ptr, streams: IPtr, row_stream: IPtr, w: Int32, h: Int32):
+    merge_body[True](po, pm, pl, dst, streams, row_stream, w, h)
 
 
 # Prompt attention (attention_rocm.cu's prompt_kernel): q (W, H, D), caches (T, HK, D) bf16 or (T, HK, ROW8) packed
@@ -1078,6 +1096,7 @@ def tf_attention_instantiate(a: Int) abi("C") -> Int:
         ctx.enqueue_function[tail16](u, u, u, u, o, i, i, i, i, f, f, f, z, z, z, z, z, x, grid_dim=1, block_dim=NL + 32)
         ctx.enqueue_function[tail8](u, u, u, u, o, i, i, i, i, f, f, f, z, z, z, z, z, x, grid_dim=1, block_dim=NL + 32)
         ctx.enqueue_function[merge](f, f, f, u, i, i, z, z, grid_dim=1, block_dim=64 * MERGE_HEADS)
+        ctx.enqueue_function[merge16](f, f, f, u, i, i, z, z, grid_dim=1, block_dim=64 * MERGE_HEADS)
         ctx.enqueue_function[prompt_p8b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
         ctx.enqueue_function[prompt_p8k](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)
         ctx.enqueue_function[prompt_p12b](u, u, u, u, z, z, z, z, z, z, x, grid_dim=1, block_dim=32)

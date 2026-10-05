@@ -197,14 +197,11 @@ def test_mojo_reads_no_key_past_an_exact_cache(monkeypatch, w, p, kv8):
     assert rows.isfinite().all()
 
 
-# g16: the partials match, but Triton's _merge compiled at G=16 rounds 1-3 merged values in a launch 1-3 ulp apart
-# from the Mojo merge (found 2026-10-05; the 27B's G=6 and every G <= 8 tried match): left visible, not fixed here
-@pytest.mark.parametrize("h,hk", [pytest.param(16, 1, marks=pytest.mark.xfail(
-    strict=True, reason="Triton _merge at G=16 differs from the Mojo merge by 1-3 ulp")), (4, 4), (40, 8)],
-    ids=["g16", "g1", "g5"])
+@pytest.mark.parametrize("h,hk", [(16, 1), (32, 2), (8, 1), (4, 4), (40, 8)], ids=["g16", "g16x2", "g8", "g1", "g5"])
 @pytest.mark.parametrize("kv8", [False, True])
 def test_mojo_gives_the_hip_bits_at_any_head_grouping(monkeypatch, h, hk, kv8):
-    """Query heads a KV head beside the 27B's 6: 16 (a full query tile), 1, and 5 (not a divisor of 16)."""
+    """Query heads a KV head beside the 27B's 6: 16 (a full query tile; its own merge kernel), 8, 1, and 5 (not a
+    divisor of 16)."""
 
     for w, p in ((9, 513), (12, 1300), (1, 3000), (16, 600)):
         inputs = _inputs(w, p, h=h, hk=hk)

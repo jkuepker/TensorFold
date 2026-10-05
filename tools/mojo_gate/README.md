@@ -213,5 +213,8 @@ error: test_qwen27_server_errors' startup budget on a 32 GB card; the xfails: th
   against 163-166 us before, but the same Mojo code measures 163 us when the bench alternates it with the old HIP
   kernel and 179 us with the backported one (commits a739558 vs e8c2ca4): the bench's interleaving, not the kernel
   (its shared launch alone stays 145-150 us).
-- G=16 (16 query heads a KV head): the shared and tail partials equal the HIP kernels', but Triton's `_merge` compiled
-  at G=16 and the Mojo merge differ by 1-3 ulp on a few values a launch; G <= 8 match (the 27B is 6).
+- G=16 (16 query heads a KV head): the merged rows differed from Triton's `_merge` by 1-3 ulp on a few values. Cause
+  (its AMDGCN at G=6, 8 and 16): with G < 16 the head mask stays and the column fold compiles as fma(o, a, b * co);
+  at G = 16 the mask folds away and the backend contracts it as fma(co, b, o * a) (l = fma(cl, b, l * a) in both).
+  The Mojo `merge16` kernel takes the second form and the launcher picks it at G = 16: every G from 1 to 16 at 1, 2, 4
+  and 8 KV heads, bf16 and packed caches, now gives Triton's bits.

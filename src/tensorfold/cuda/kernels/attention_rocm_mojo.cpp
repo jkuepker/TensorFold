@@ -13,7 +13,7 @@ void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, 
                const at::Tensor& depths, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int tails, double scale,
                bool kv8);
 void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl, at::Tensor& out,
-                const at::Tensor& streams, const at::Tensor& rows);
+                const at::Tensor& streams, const at::Tensor& rows, int g);
 
 bool prompt_supported(int heads, int kv_heads, int dim);
 void prompt_attention(const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache, at::Tensor& out,

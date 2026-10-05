@@ -35,8 +35,9 @@ constexpr int MERGE_HEADS = 4;              // attention_rocm.mojo's MERGE_HEADS
     } while (0)
 
 // the prompt kernels follow MERGE, one a (loaders or not, block size, cache format): prompt_p{8,12,16,20}{b,k}
-// then prompt_f{8,12,16}{b,k} (waves a block; bf16, then packed caches)
-enum { SHARED_PIPE, SHARED_PIPE8, SHARED_FLAT, SHARED_FLAT8, TAIL16, TAIL8, MERGE, PROMPT, KERNELS = PROMPT + 14 };
+// then prompt_f{8,12,16}{b,k} (waves a block; bf16, then packed caches); MERGE16: the merge for 16 heads a KV head
+enum { SHARED_PIPE, SHARED_PIPE8, SHARED_FLAT, SHARED_FLAT8, TAIL16, TAIL8, MERGE, PROMPT, MERGE16 = PROMPT + 14,
+       KERNELS };
 
 constexpr int MAX_GPUS = 16;
 
@@ -134,10 +135,10 @@ void load_kernels(int device, const std::vector<std::string>& paths, const std::
     TORCH_CHECK(device >= 0 && device < MAX_GPUS, "GPU ", device, ": the Mojo attention takes ", MAX_GPUS,
                 " at most");
     TORCH_CHECK(paths.size() == KERNELS && symbols.size() == KERNELS && args.size() == KERNELS,
-                "the Mojo attention has 21 kernels");
+                "the Mojo attention has 22 kernels");
     for (int i = 0; i < KERNELS; ++i) {
-        check_args(symbols[i], args[i], i < TAIL16 ? SHARED_ARGS : i < MERGE ? TAIL_ARGS : i == MERGE ? MERGE_ARGS
-                                                                                                      : PROMPT_ARGS);
+        check_args(symbols[i], args[i], i < TAIL16 ? SHARED_ARGS : i < MERGE ? TAIL_ARGS
+                                        : i == MERGE || i == MERGE16 ? MERGE_ARGS : PROMPT_ARGS);
     }
     Kernels& k = g_kernels[device];
     std::lock_guard<std::mutex> lock(g_load);
@@ -201,9 +202,10 @@ void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, 
     if (w > 0) launch(kernel(device, kv8 ? TAIL8 : TAIL16), device, dim3(w, hk, tails), NL + 32, args);
 }
 
-// attention.py's _merge: po (chunks, W, H, 256), pm and pl (chunks, W, H) fp32 -> out (W, H, 256) bf16.
+// attention.py's _merge: po (chunks, W, H, 256), pm and pl (chunks, W, H) fp32 -> out (W, H, 256) bf16; g query
+// heads a KV head (16: Triton compiles _merge's column fold in the other fma order, so its own kernel).
 void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl, at::Tensor& out,
-                const at::Tensor& streams, const at::Tensor& rows) {
+                const at::Tensor& streams, const at::Tensor& rows, int g) {
     int w = out.size(0), h = out.size(1);
     const int device = gpu_of(out);
     TORCH_CHECK(out.size(2) == D && po.size(3) == D && out.is_contiguous() && po.is_contiguous(),
@@ -217,7 +219,8 @@ void tree_merge(const at::Tensor& po, const at::Tensor& pm, const at::Tensor& pl
     void* args[] = {&pop, &pmp, &plp, &outp, &sp, &rp, &w, &h};
     OnDevice here(device);
     if (w > 0) {
-        launch(kernel(device, MERGE), device, dim3(w, (h + MERGE_HEADS - 1) / MERGE_HEADS), 64 * MERGE_HEADS, args);
+        launch(kernel(device, g == 16 ? MERGE16 : MERGE), device, dim3(w, (h + MERGE_HEADS - 1) / MERGE_HEADS),
+               64 * MERGE_HEADS, args);
     }
 }
 

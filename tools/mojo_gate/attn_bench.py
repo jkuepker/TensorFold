@@ -119,7 +119,7 @@ def main():
 
                 def part_merge(i, kind=kind, ext=ext):
                     if kind == "mojo":
-                        ext.merge(po, pm, pl, out, plan.streams, plan.rows)
+                        ext.merge(po, pm, pl, out, plan.streams, plan.rows, H // HK)
                     else:
                         shared._merge[(w, HK, D // shared.MERGE_COLUMNS)](po, pm, pl, out, plan.streams, plan.rows,
                                                                           w, H=H, D=D, G=H // HK,

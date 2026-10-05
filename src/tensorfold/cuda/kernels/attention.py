@@ -220,7 +220,7 @@ def _mojo_ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_attention_rocm_mojo_v3", sources=[str(here / "attention_rocm_mojo.cpp"),
+    return load(name="tensorfold_attention_rocm_mojo_v4", sources=[str(here / "attention_rocm_mojo.cpp"),
                                                                   str(here / "attention_rocm_mojo.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
@@ -239,7 +239,7 @@ def _mojo(device: int):
     ext = _mojo_ext()
     names = ("shared_pipe", "shared_pipe8", "shared_flat", "shared_flat8", "tail16", "tail8", "merge",
              *(f"prompt_{kind}{waves}{fmt}" for kind, sizes in (("p", (8, 12, 16, 20)), ("f", (8, 12, 16)))
-               for waves in sizes for fmt in ("b", "k")))
+               for waves in sizes for fmt in ("b", "k")), "merge16")
     k = kernels(manifest, names)
     ext.load_kernels(device, [str(built / e["hsaco"]) for e in k], [e["symbol"] for e in k], [arg_sizes(e) for e in k])
     return ext
@@ -387,7 +387,7 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
                               MAXD=MAX_NODES, SCALE=scale, KT=kt, num_warps=warps, num_stages=stages)
     out = torch.empty_like(q)
     if kind == "mojo":
-        ext.merge(partial_o, partial_m, partial_l, out, p.streams, p.rows)
+        ext.merge(partial_o, partial_m, partial_l, out, p.streams, p.rows, g)
         return out
     _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
                                         DS=MERGE_COLUMNS, num_warps=4)
