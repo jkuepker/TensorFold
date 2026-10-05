@@ -216,14 +216,44 @@ def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
     return cw, (chunks < LONG_CHUNKS or cw < 4) if not pipe else pipe == "1"     # under 4 waves loading is slow
 
 
+@lru_cache(maxsize=1)
+def _mojo():
+    """The Mojo tree attention's launcher with its kernels loaded: ``attention_rocm.mojo`` built to code objects at
+    first use (cached by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
+
+    from pathlib import Path
+
+    from tensorfold.cuda.build import hip_arch, load
+    from tensorfold.cuda.mojo import build_hsaco
+
+    here = Path(__file__).parent
+    built, manifest = build_hsaco(here / "attention_rocm.mojo", hip_arch())
+    ext = load(name="tensorfold_attention_rocm_mojo_v1", sources=[str(here / "attention_rocm_mojo.cpp"),
+                                                                 str(here / "attention_rocm_mojo.cu")],
+               extra_cuda_cflags=["-O3"], verbose=False)
+    k = {e["name"]: e for e in manifest["kernels"]}
+    names = ("shared_pipe", "shared_pipe8", "shared_flat", "shared_flat8", "tail16", "tail8", "merge")
+    ext.load_kernels([str(built / k[n]["hsaco"]) for n in names], [k[n]["symbol"] for n in names])
+    return ext
+
+
 @lru_cache(maxsize=None)                        # a process's choice, read once per shape
-def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> bool:
-    """ROCm's WMMA tree attention (``attention_rocm.cu``) where it applies: on gfx12 unless ``TF_ROCM_TREE_KERNEL=triton``,
-    never on other AMD GPUs (its builtins are gfx12's); the two give different bits, so a process uses one."""
+def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> str | None:
+    """ROCm's WMMA tree attention where it applies: on gfx12 unless ``TF_ROCM_TREE_KERNEL=triton``, never on other AMD
+    GPUs (its builtins are gfx12's). ``wmma`` (the default): ``attention_rocm.cu``; ``mojo``: the same kernels and
+    merge in Mojo (``attention_rocm.mojo``, built at first use by the ``mojo`` compiler), the same bits. WMMA and
+    Triton give different bits, so a process uses one."""
+
+    import os
 
     from tensorfold.cuda.build import wmma
 
-    return wmma("TF_ROCM_TREE_KERNEL") and _rocm().tree_supported(heads, kv_heads, dim)
+    if not wmma("TF_ROCM_TREE_KERNEL"):
+        return None
+    if os.environ.get("TF_ROCM_TREE_KERNEL") == "mojo":
+        mojo = dim == 256 and kv_heads > 0 and heads % kv_heads == 0 and heads // kv_heads <= QUERY_TILE
+        return "mojo" if mojo else None
+    return "wmma" if _rocm().tree_supported(heads, kv_heads, dim) else None
 
 
 def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int) -> tuple[list[int], int, int]:
@@ -326,8 +356,9 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     partial_m = torch.empty((p.chunks, w, h), dtype=torch.float32, device=q.device)
     partial_l = torch.empty_like(partial_m)
     tails = 1 + -(-MAX_NODES // CHUNK)
-    if hip() and gfx12() and _rocm_kernel(h, hk, d):     # gfx12: WMMA for head size 256
-        ext = _rocm()
+    kind = _rocm_kernel(h, hk, d) if hip() and gfx12() else None
+    if kind:                                            # gfx12: WMMA for head size 256
+        ext = _mojo() if kind == "mojo" else _rocm()
         ext.shared(q, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l, hk,
                    *rocm_launch(-(-w * g // QUERY_TILE), p.chunks), scale, kv8)
         ext.tail(q, k_nodes, v_nodes, origin, offs, p.streams, p.rows, p.paths, p.depths, partial_o, partial_m,
@@ -345,6 +376,9 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
                               partial_o, partial_m, partial_l, w, v_nodes.stride(0), H=h, HK=hk, D=d, G=g, CH=CHUNK,
                               MAXD=MAX_NODES, SCALE=scale, KT=kt, num_warps=warps, num_stages=stages)
     out = torch.empty_like(q)
+    if kind == "mojo":
+        ext.merge(partial_o, partial_m, partial_l, out, p.streams, p.rows)
+        return out
     _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
                                         DS=MERGE_COLUMNS, num_warps=4)
     return out
