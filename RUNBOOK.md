@@ -125,6 +125,25 @@ Linux uses O_DIRECT, sizes memory with Windows' own API, and prints every thread
 compute capability 8.9 are refused at startup. WSL2 runs the Linux engine instead: inside Ubuntu, follow
 [RTX cards without Docker](#rtx-cards-without-docker). We have not run it under WSL2 yet either.
 
+<a id="amd-mojo"></a>
+
+## AMD gfx12: the Mojo kernels (opt-in)
+
+On a gfx12 GPU (e.g. the Radeon AI PRO R9700) five settings swap a ROCm kernel for its port in Mojo; see
+[the recipe](docs/recipes/qwen3.8-27b.md#amd-gpus-rocm-experimental) for what each does. They need the Mojo
+compiler, which TensorFold does not install. Mojo 1.1 (with MAX 26.6) is the supported release; a start refuses any
+other with this install line:
+
+```bash
+python -m pip install "mojo>=1.1,<1.2" "max[all]>=26.6,<26.7" --extra-index-url https://whl.modular.com/simple/
+```
+
+Install it into TensorFold's virtual environment, or into one of its own and point `TF_MOJO` at its `mojo` binary.
+Mojo loads `libamdhip64.so`; where the ROCm image keeps it outside the loader's path, add that directory to
+`LD_LIBRARY_PATH`. The first call builds each kernel source for the GPU's architecture and caches the code objects
+under the torch extensions directory (`TORCH_EXTENSIONS_DIR`, in `mojo/`); later starts reuse them. A start waiting
+on another's build says so; if a killed build left the lock, stop, delete the `.lock` file it names and start again.
+
 ## Memory and context
 
 Omit `--context` on MLX to fit the default window to the model and memory budget, then inspect the

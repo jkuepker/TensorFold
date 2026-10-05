@@ -3,6 +3,16 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **Mojo kernels on AMD gfx12 (opt-in).** With the Mojo compiler installed (Mojo 1.1), `TF_ROCM_LANE`,
+  `TF_ROCM_TREE_KERNEL`, `TF_ROCM_ATTN_KERNEL`, `TF_ROCM_PREFILL_GEMM` and `TF_ROCM_PREFILL8_GEMM` take `mojo`: the
+  decode matmul, tree and prompt attention and the prompt GEMMs in Mojo, with the same bits as the kernels they
+  replace. On an R9700 the 27B fills prompts 12.5-13.6% faster with all five; the FP8 prompt GEMM is slower than
+  Triton's and stays off unless asked for. See the RUNBOOK for the install.
+- **Fixes:** `TF_ROCM_TREE_KERNEL` and `TF_ROCM_ATTN_KERNEL` refuse a value they do not know instead of running the
+  default kernel.
+
 ## 0.6.2 (2 Oct 2026)
 
 - **Flash Next on Macs at 64k-128k.** On an M3 Ultra, one stream runs 1.2-3.4% faster at 64k and 3.9-5.5% at 128k,

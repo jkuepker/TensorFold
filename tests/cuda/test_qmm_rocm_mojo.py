@@ -1,0 +1,167 @@
+"""The Mojo lane matmul (qmm_rocm.mojo, TF_ROCM_LANE=mojo) gives the HIP WMMA lane's bits, row for row."""
+
+import shutil
+
+import pytest
+import torch
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA only", allow_module_level=True)
+
+from tensorfold.cuda.build import gfx12, hip  # noqa: E402
+
+if not hip() or not gfx12():
+    pytest.skip("the WMMA lane matmul is gfx12's", allow_module_level=True)
+
+from tensorfold.cuda import mojo  # noqa: E402
+
+try:
+    mojo.mojo_binary()
+except RuntimeError:
+    pytest.skip("no Mojo compiler", allow_module_level=True)
+
+from tensorfold.cuda.kernels import qmm_groups  # noqa: E402
+
+# test_qmm_rocm.py's shapes, then the 27B's projections as the decode path runs them (K = 5120 unless noted):
+# attention q, k/v, [k | v], [q | k | v], o; GDN qkv, z, a/b, [z | b | a], [qkv | z | b | a], out; MLP gate/up,
+# [gate | up], down
+TEST_SHAPES = [(1000, 1024), (48, 5120), (5120, 17408), (17408, 5120), (130, 64), (1, 128)]
+SHAPES_27B = [(12288, 5120), (1024, 5120), (2048, 5120), (14336, 5120), (5120, 6144), (10240, 5120), (6144, 5120),
+              (48, 5120), (6240, 5120), (16480, 5120), (17408, 5120), (34816, 5120), (5120, 17408)]
+
+
+def _weight(n, k, seed):
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+    words = words.to(torch.int32)
+    scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.01 + 0.001).bfloat16()
+    biases = (torch.randn(n, k // 64, generator=gen, device="cuda") * 0.02).bfloat16()
+    return qmm_groups.to_groups(words, scales, biases), gen
+
+
+def _same(x, g, n, f32=False):
+    hip_ = qmm_groups.gemv(x, *g, n, f32=f32, wmma=True)
+    mojo_ = qmm_groups.gemv(x, *g, n, f32=f32, mojo=True)
+    return torch.equal(hip_.view(torch.int16 if not f32 else torch.int32),
+                       mojo_.view(torch.int16 if not f32 else torch.int32))
+
+
+@pytest.mark.parametrize("n,k", TEST_SHAPES)
+def test_mojo_gives_the_wmma_bits_on_the_rocm_test_shapes(n, k):
+    g, gen = _weight(n, k, n + k)
+    x = torch.randn(40, k, generator=gen, device="cuda").bfloat16()
+    for m in (1, 4, 8, 12, 16, 17, 33, 40):
+        assert _same(x[:m].contiguous(), g, n), m
+        assert _same(x[:m].contiguous(), g, n, f32=True), m
+
+
+@pytest.mark.parametrize("n,k", SHAPES_27B)
+def test_mojo_gives_the_wmma_bits_on_the_27b_projections(n, k):
+    g, gen = _weight(n, k, 7 * n + k)
+    x = torch.randn(16, k, generator=gen, device="cuda").bfloat16()
+    for m in (1, 4, 8, 12, 16):
+        assert _same(x[:m].contiguous(), g, n), m
+    assert _same(x[:12].contiguous(), g, n, f32=True)
+
+
+def test_mojo_runs_on_the_current_stream():
+    n, k = 5120, 17408
+    g, gen = _weight(n, k, 3)
+    x = torch.randn(12, k, generator=gen, device="cuda").bfloat16()
+    ref = qmm_groups.gemv(x, *g, n, wmma=True)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        big = torch.randn(4096, 4096, device="cuda")
+        for _ in range(4):
+            big = big @ big                             # keeps the stream busy before x changes on it
+        y = x * 1.0                                     # written on the side stream just before the matmul
+        got = qmm_groups.gemv(y, *g, n, mojo=True)
+    side.synchronize()
+    assert torch.equal(got, ref)
+
+
+def test_mojo_lane_is_picked_by_tf_rocm_lane(monkeypatch):
+    monkeypatch.setenv("TF_ROCM_LANE", "mojo")
+    qmm_groups.lane_kernel.cache_clear()
+    try:
+        assert qmm_groups.lane_kernel() == "mojo"
+        g, gen = _weight(1024, 5120, 9)
+        x = torch.randn(12, 5120, generator=gen, device="cuda").bfloat16()
+        assert torch.equal(qmm_groups.matmul(x, *g, 1024), qmm_groups.gemv(x, *g, 1024, wmma=True))
+    finally:
+        qmm_groups.lane_kernel.cache_clear()
+
+
+def _refuse():
+    raise AssertionError("the Mojo lane built the HIP extension")
+
+
+def test_mojo_lane_needs_no_hip_extension(monkeypatch):
+    """TF_ROCM_LANE=mojo takes its K slices from its own launcher: qmm_rocm.cu is never built."""
+
+    g, gen = _weight(1024, 5120, 11)
+    x = torch.randn(12, 5120, generator=gen, device="cuda").bfloat16()
+    monkeypatch.setenv("TF_ROCM_LANE", "mojo")
+    monkeypatch.setattr(qmm_groups, "_rocm", _refuse)
+    qmm_groups.lane_kernel.cache_clear()
+    qmm_groups._slices.cache_clear()
+    try:
+        got = qmm_groups.matmul(x, *g, 1024)
+    finally:
+        monkeypatch.undo()
+        qmm_groups.lane_kernel.cache_clear()
+        qmm_groups._slices.cache_clear()
+    assert torch.equal(got, qmm_groups.gemv(x, *g, 1024, wmma=True))
+
+
+def test_mojo_launcher_refuses_other_argument_sizes():
+    """A kernel whose manifest lists other argument sizes than its launch passes is refused at load."""
+
+    from pathlib import Path
+
+    from tensorfold.cuda.build import hip_arch
+
+    built, manifest = mojo.build_hsaco(Path(qmm_groups.__file__).parent / "qmm_rocm.mojo", hip_arch())
+    one, two = mojo.kernels(manifest, ("wmma_mt1", "wmma_mt2"))
+    sizes = mojo.arg_sizes(one)
+    assert sizes == mojo.arg_sizes(two) and len(sizes) == 16
+    wrong = sizes[:1] + [8] + sizes[2:]                     # ldx2 widened to 64 bits
+    with pytest.raises(RuntimeError, match="disagree"):
+        qmm_groups._mojo_ext().load_kernels(torch.cuda.current_device(), str(built / one["hsaco"]), one["symbol"],
+                                            wrong, str(built / two["hsaco"]), two["symbol"], sizes)
+
+
+def test_missing_mojo_says_so(monkeypatch):
+    monkeypatch.delenv("TF_MOJO", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(mojo.sys, "executable", "/nonexistent/python")
+    mojo.mojo_binary.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="needs the Mojo compiler"):
+            mojo.mojo_binary()
+    finally:
+        mojo.mojo_binary.cache_clear()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_mojo_gives_the_wmma_bits_on_each_gpu():
+    """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its
+    tensors' GPU."""
+
+    n, k = 1000, 1024
+    for dev in (0, 1, 0):
+        with torch.cuda.device(dev):
+            g, gen = _weight(n, k, n + k)
+            x = torch.randn(40, k, generator=gen, device="cuda").bfloat16()
+            for m in (1, 12, 33, 40):
+                assert _same(x[:m].contiguous(), g, n), (dev, m)
+                assert _same(x[:m].contiguous(), g, n, f32=True), (dev, m)
+    with torch.cuda.device(1):
+        g, gen = _weight(n, k, n + k)
+        x = torch.randn(12, k, generator=gen, device="cuda").bfloat16()
+        xs = qmm_groups.group_sums(x)
+        want = qmm_groups.gemv(x, *g, n, xs, wmma=True)
+    with torch.cuda.device(0):
+        got = qmm_groups.gemv(x, *g, n, xs, mojo=True)
+    assert torch.equal(want.view(torch.int16), got.view(torch.int16))
