@@ -138,6 +138,19 @@ GLM draft ring and Qwen27 GPU tests plus test_cuda_build/test_cuda_kv8 give 399 
 as with `TF_ROCM_TREE_KERNEL=wmma` (test_glm_draft_ring's flat-buffer bits and the GLM experts extension not
 building in this image).
 
+## HIP backport of the Phase 1 and Phase 3 tuning
+
+qmm_rocm.cu's wmma_kernel and attention_rocm.cu's shared_kernel take the changes above, the same bits (the *_mojo
+tests compare them): results in hip_backport_results.txt. Lane matmul: 0.97-1.03 of the Mojo lane's time on every
+27B projection at rows 1-16 except gdn zba (1.07-1.09: the HIP kernel holds 4 blocks a WGP, Mojo 3, so 98 one-item
+blocks instead of 49 two-item ones; TF_ROCM_WMMA_GRID=96 gives 0.99). Tree attention's shared kernel: 0.98-1.02 of
+Mojo's time except packed FP8 at 16k (1 row 1.14, 12 rows 0.78); the pipelined path also stopped unrolling the
+chunk (32 folds were 1,024 WMMAs of code). fold's LDS reads already took immediate offsets in hipcc. The tail stays
+as it was: the five-wave branch-free tail measured 0.3 us slower in HIP at one row (bf16), no faster with FP8.
+End to end (Qwen3.8-27B MLX 4-bit + DFlash2, 61,489-token fixed prompt, 34 rounds, A-B-A-B on one tree): new HIP
+167.3/167.5 tok/s cached (44.9 ms/round), Mojo 167.8/167.7 (44.9); fork/mojo-r9700's HIP was 48.0 ms/round. Replies
+unchanged (8ec3b3018edf, 27b232152250 draft on and off; 7fdef2c415b6 at 61.5k).
+
 ## Phase 4: DGX Spark (GB10, sm_121, aarch64)
 
 Toolchain and launch-path gate on spark2: see `spark/README.md` (results table) and `cumodule/` (PTX/cubin carve-out
