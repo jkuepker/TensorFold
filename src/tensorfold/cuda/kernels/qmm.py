@@ -42,19 +42,20 @@ def _mojo():
     here = Path(__file__).parent
     major, minor = torch.cuda.get_device_capability()
     built, manifest = build_cubin(here / "qmm_prefill.mojo", f"sm_{major}{minor}")
-    ext = load(name="tensorfold_qmm_prefill_mojo_v1", sources=[str(here / "qmm_prefill_mojo.cpp"),
+    ext = load(name="tensorfold_qmm_prefill_mojo_v2", sources=[str(here / "qmm_prefill_mojo.cpp"),
                                                               str(here / "qmm_prefill_mojo.cu")],
                extra_cuda_cflags=["-O3"], extra_ldflags=["-lcuda"], verbose=False)
     k = {e["name"]: e for e in manifest["kernels"]}
-    ext.load_kernels(*(v for name in ("prefill_bf16", "prefill_f32")
-                       for v in (str(built / k[name]["cubin"]), k[name]["symbol"])))
+    names = ("prefill_bf16", "prefill_f32", "prefill8_bf16", "prefill8_f32")
+    ext.load_kernels([str(built / k[name]["cubin"]) for name in names], [k[name]["symbol"] for name in names])
     return ext
 
 
 @lru_cache(maxsize=1)
 def prefill_kernel() -> str:
-    """The bf16 prompt matmul: ``cuda`` (``qmm_prefill.cu``, the default) or ``mojo`` (``qmm_prefill.mojo``: the same
-    kernel in Mojo, the same bits, built at first use by the ``mojo`` compiler); ``TF_CUDA_PREFILL_GEMM`` picks it."""
+    """The prompt matmuls (bf16 and FP8 rows): ``cuda`` (``qmm_prefill.cu``, ``qmm_prefill8.cu``, the default) or
+    ``mojo`` (``qmm_prefill.mojo``: the same kernels in Mojo, the same bits, built at first use by the ``mojo``
+    compiler); ``TF_CUDA_PREFILL_GEMM`` picks them."""
 
     kind = os.environ.get("TF_CUDA_PREFILL_GEMM") or "cuda"
     if kind not in ("cuda", "mojo"):
@@ -299,13 +300,17 @@ def quantize_rows(x: torch.Tensor, gs: int = 64) -> tuple[torch.Tensor, torch.Te
 
 
 def prefill_matmul8(xq: tuple[torch.Tensor, torch.Tensor, torch.Tensor], q: Q4, *, f32: bool = False, tile: int = 0,
-                    out: torch.Tensor | None = None) -> torch.Tensor:
-    """FP8 prefill matmul on ``quantize_rows`` output, exact e4m3 weights; a row's bits depend only on its inputs."""
+                    out: torch.Tensor | None = None, mojo: bool | None = None) -> torch.Tensor:
+    """FP8 prefill matmul on ``quantize_rows`` output, exact e4m3 weights; a row's bits depend only on its inputs.
+    ``mojo`` (default: ``TF_CUDA_PREFILL_GEMM``) runs 64-input groups on the Mojo kernel (fixed tile, same bits)."""
 
     x8, xs, a = xq
     if x8.dim() != 2 or x8.shape[1] != q.k:
         raise ValueError(f"prefill_matmul8: inputs must be (M, {q.k})")
     if out is None:
         out = torch.empty((x8.shape[0], q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)
+    if q.gs == 64 and (prefill_kernel() == "mojo" if mojo is None else mojo):
+        _mojo().prefill8(x8, xs, a, q.weight, q.scales, q.biases, out, q.n)
+        return out
     _ext().qmm_prefill8(x8, xs, a, q.weight, q.scales, q.biases, out, q.n, q.gs, f32, tile)
     return out
