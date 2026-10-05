@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Sequence
 
 import torch
@@ -191,8 +192,6 @@ def rocm_config() -> tuple[int, int, int]:
 
 @lru_cache(maxsize=1)
 def _rocm():
-    from pathlib import Path
-
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent                        # prompt and tree attention: one extension
@@ -218,8 +217,6 @@ def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
 
 @lru_cache(maxsize=1)
 def _mojo_ext():
-    from pathlib import Path
-
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
@@ -234,8 +231,6 @@ def _mojo(device: int):
     ``attention_rocm.mojo`` built to code objects at first use (cached by its hash and the GPU's architecture, so
     same-architecture cards share them), launched with hipModuleLaunchKernel on torch's current stream of the tensors'
     GPU."""
-
-    from pathlib import Path
 
     from tensorfold.cuda.build import hip_arch
     from tensorfold.cuda.mojo import arg_sizes, build_hsaco, kernels
