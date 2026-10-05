@@ -352,7 +352,7 @@ def test_nvidia_and_a_rocm_host_with_no_gpu_are_not_gfx12(monkeypatch):
 
 @pytest.mark.parametrize("arch, env, expected", [
     ("gfx1201", None, True), ("gfx1201", "triton", False), ("gfx1201", "wmma", True), ("gfx1201", "dot2", True),
-    ("gfx1151", None, False), ("gfx1151", "triton", False),
+    ("gfx1201", "mojo", True), ("gfx1151", None, False), ("gfx1151", "triton", False),
 ])
 def test_the_wmma_kernels_are_the_rocm_default_on_gfx12_only(monkeypatch, arch, env, expected):
     """The WMMA builtins are gfx12's (they do not compile for gfx1151): other AMD GPUs default to Triton."""
@@ -366,7 +366,7 @@ def test_the_wmma_kernels_are_the_rocm_default_on_gfx12_only(monkeypatch, arch, 
     assert build.wmma("TF_ROCM_TREE_KERNEL") is expected
 
 
-@pytest.mark.parametrize("env", ["wmma", "dot2"])
+@pytest.mark.parametrize("env", ["wmma", "dot2", "mojo"])
 def test_asking_for_the_wmma_kernels_off_gfx12_is_refused(monkeypatch, env):
     monkeypatch.setattr(build, "hip", lambda: True)
     monkeypatch.setattr(build, "hip_arch", lambda: "gfx1151")
@@ -377,7 +377,8 @@ def test_asking_for_the_wmma_kernels_off_gfx12_is_refused(monkeypatch, env):
 
 @pytest.mark.torch
 @pytest.mark.parametrize("arch, env, expected", [("gfx1201", None, "wmma"), ("gfx1201", "dot2", "dot2"),
-                                                 ("gfx1201", "triton", "triton"), ("gfx1151", None, "triton")])
+                                                 ("gfx1201", "mojo", "mojo"), ("gfx1201", "triton", "triton"),
+                                                 ("gfx1151", None, "triton")])
 def test_the_rocm_lane_matmul_follows_the_gpu(cuda_modules, monkeypatch, arch, env, expected):  # noqa: F811
     from tensorfold.cuda.kernels import qmm_groups
 
@@ -392,6 +393,62 @@ def test_the_rocm_lane_matmul_follows_the_gpu(cuda_modules, monkeypatch, arch, e
         assert qmm_groups.lane_kernel() == expected
     finally:
         qmm_groups.lane_kernel.cache_clear()
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("arch, env, expected", [("gfx1201", "mojo", "mojo"), ("gfx1201", "triton", None),
+                                                 ("gfx1151", None, None), ("gfx1151", "mojo", ValueError),
+                                                 ("gfx1201", "mojo2", ValueError), ("gfx1151", "wmmma", ValueError)])
+def test_the_rocm_attention_kernels_follow_the_gpu(cuda_modules, monkeypatch, arch, env, expected):  # noqa: F811
+    """TF_ROCM_TREE_KERNEL and TF_ROCM_ATTN_KERNEL: mojo on gfx12, refused elsewhere; a value outside triton, wmma and
+    mojo is refused on any GPU, as TF_ROCM_LANE's are."""
+
+    from tensorfold.cuda.kernels import attention, prefill_attention
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: arch)
+    monkeypatch.setattr(attention, "_mojo_ext", lambda: SimpleNamespace(prompt_supported=lambda h, hk, d: True))
+    for env_name, route in (("TF_ROCM_TREE_KERNEL", attention._rocm_kernel),
+                            ("TF_ROCM_ATTN_KERNEL", prefill_attention._rocm_kernel)):
+        if env is None:
+            monkeypatch.delenv(env_name, raising=False)
+        else:
+            monkeypatch.setenv(env_name, env)
+        route.cache_clear()
+        try:
+            if expected is ValueError:
+                with pytest.raises(ValueError, match=env_name):
+                    route(24, 4, 256)
+            else:
+                assert route(24, 4, 256) == expected
+        finally:
+            route.cache_clear()
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("arch, env, expected", [("gfx1201", None, "triton"), ("gfx1201", "mojo", "mojo"),
+                                                 ("gfx1201", "triton", "triton"), ("gfx1151", None, "triton"),
+                                                 ("gfx1151", "mojo", ValueError), ("gfx1201", "wmma", ValueError)])
+def test_the_rocm_prompt_gemms_follow_the_gpu(cuda_modules, monkeypatch, arch, env, expected):  # noqa: F811
+    from tensorfold.cuda.kernels import qmm_groups
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(build, "hip_arch", lambda: arch)
+    for env_name, route in (("TF_ROCM_PREFILL_GEMM", qmm_groups.prefill_gemm),
+                            ("TF_ROCM_PREFILL8_GEMM", qmm_groups.prefill8_gemm)):
+        if env is None:
+            monkeypatch.delenv(env_name, raising=False)
+        else:
+            monkeypatch.setenv(env_name, env)
+        qmm_groups.reload_settings()
+        try:
+            if expected is ValueError:
+                with pytest.raises(ValueError, match=env_name):
+                    route()
+            else:
+                assert route() == expected
+        finally:
+            qmm_groups.reload_settings()
 
 
 @pytest.mark.torch

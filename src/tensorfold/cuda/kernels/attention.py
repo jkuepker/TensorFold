@@ -261,6 +261,8 @@ def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> str | None:
 
     from tensorfold.cuda.build import wmma
 
+    if (os.environ.get("TF_ROCM_TREE_KERNEL") or "") not in ("", "triton", "wmma", "mojo"):
+        raise ValueError("TF_ROCM_TREE_KERNEL: triton, wmma or mojo")
     if not wmma("TF_ROCM_TREE_KERNEL"):
         return None
     if os.environ.get("TF_ROCM_TREE_KERNEL") == "mojo":
