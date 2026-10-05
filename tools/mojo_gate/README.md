@@ -142,3 +142,32 @@ building in this image).
 
 Toolchain and launch-path gate on spark2: see `spark/README.md` (results table) and `cumodule/` (PTX/cubin carve-out
 and the `cuModuleLoadData` + `cuLaunchKernel` launch route, the NVIDIA twin of `hipmodule/`).
+
+## Phase 5: the GB10 prompt matmul in Mojo (`TF_CUDA_PREFILL_GEMM=mojo`)
+
+`src/tensorfold/cuda/kernels/qmm_prefill.mojo` ports `qmm_prefill.cu`'s `prefill_kernel` at the tile the engine uses
+(`prompt_tile` 9: 128 x 128, 2 x 2 warps of 64 x 64, two stages; `prefill_bf16`, `prefill_f32`) and `qmm_prefill8.cu`'s
+4-bit-word `prefill8_kernel` at the engine's tile 0 (three stages; `prefill8_bf16`, `prefill8_f32`, the `--prefill-fp8`
+path). `cuda/mojo.py`'s `build_cubin` carves each kernel's PTX from `mojo build --emit object --target-accelerator
+sm_121`, runs ptxas and caches the cubins by source hash, Mojo and ptxas versions; `qmm_prefill_mojo.cu` loads them with
+`cuModuleLoadData` and launches with `cuLaunchKernel` on torch's current stream with the CUDA kernels' grids (L2 bands
+of `group` row tiles). `qmm.prefill_matmul` / `prefill_matmul8` route there under the flag (64-input groups; groups of
+32 stay on CUDA); the default is unchanged.
+
+Bits: `torch.equal` to the CUDA kernels on test_qwen27_prefill/test_qmm's prompt shapes and the 27B's projections at
+1-4096 rows (chunks() makes any count up to 4096), bf16 and fp32 out, bf16 and FP8 rows, strided rows, a
+non-default stream (tests/cuda/test_qmm_prefill_mojo.py, 36 tests). Nothing to match beyond the instructions: the same
+`fma.rn.bf16x2` / `sub.rn.bf16x2` (e4m3: `sub.rn.f16x2` + `cvt.rn.satfinite.e4m3x2.f16x2`) as inline PTX, the same
+`mma.sync` shapes in the same group-then-k order, explicit `fma` for FP8's per-group scale, `cvt.rn` outputs. Rows past
+M read row M - 1 instead of cp.async zero-fill (never stored, and rows are independent in an MMA).
+
+Speed (spark/prefill_bench.py, spark/prefill_bench_results.txt; 27B projections at 512-4096 rows): bf16 rows 1.015-1.086x
+the CUDA kernel (median 1.059; 88-95 TFLOPS, cuBLAS dense bf16 reaches 94.6 on the same box); FP8 rows 0.952-1.125x
+(median 0.982). What it took: a literal port ran at parity (0.967-1.018) with 255 registers, 40 bytes of spills and
+440 moves, because Mojo's `mma()` takes SIMD[f32, 4] accumulators and on sm_121 v2f32 is a legal LLVM type, so they
+travel as 64-bit register pairs (`mov.b64 {%r, %r}, %rd` around every mma). An inline-asm mma with tied scalar
+accumulators (`_RegisterPackType` of four Float32, constraints `0,1,2,3`: qmm_frag.cuh's `"+f"` form) removed the
+spills and most moves. The bf16 kernel is then tensor-pipe bound: dropping the weight dequant changed nothing.
+Tried for FP8 and dropped: the CUDA kernel's tile j / tile j-1 interleave, volatile asm to pin order, an inline-asm
+ldmatrix, one 32-bit scale-pair read, one asm per e4m3 B register (all 0.94-0.97), 2 x 4 warps (174 registers, one
+block per SM: 0.83). Its K loop is within 1% of nvcc's in instruction count; the ~2% left is scheduling.
