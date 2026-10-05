@@ -205,13 +205,12 @@ def _mojo(device: int):
     hipModuleLaunchKernel on torch's current stream of the tensors' GPU."""
 
     from tensorfold.cuda.build import hip_arch
-    from tensorfold.cuda.mojo import build_hsaco
+    from tensorfold.cuda.mojo import build_hsaco, kernels
 
     built, manifest = build_hsaco(Path(__file__).parent / "qmm_rocm.mojo", hip_arch(device))
     ext = _mojo_ext()
-    k = {e["name"]: e for e in manifest["kernels"]}
-    ext.load_kernels(device, *(v for name in ("wmma_mt1", "wmma_mt2")
-                               for v in (str(built / k[name]["hsaco"]), k[name]["symbol"])))
+    ext.load_kernels(device, *(v for e in kernels(manifest, ("wmma_mt1", "wmma_mt2"))
+                               for v in (str(built / e["hsaco"]), e["symbol"])))
     return ext
 
 
@@ -467,13 +466,13 @@ def _prefill_mojo(device: int):
     launched with hipModuleLaunchKernel on torch's current stream of the tensors' GPU."""
 
     from tensorfold.cuda.build import hip_arch
-    from tensorfold.cuda.mojo import build_hsaco
+    from tensorfold.cuda.mojo import build_hsaco, kernels
 
     built, manifest = build_hsaco(Path(__file__).parent / "prefill_rocm.mojo", hip_arch(device))
     ext = _prefill_mojo_ext()
-    k = {e["name"]: e for e in manifest["kernels"]}
     tiles = list(PREFILL_TILES.values()) + list(PREFILL8_TILES.values())
-    ext.load_kernels(device, [str(built / k[t[0]]["hsaco"]) for t in tiles], [k[t[0]]["symbol"] for t in tiles],
+    k = kernels(manifest, [t[0] for t in tiles])
+    ext.load_kernels(device, [str(built / e["hsaco"]) for e in k], [e["symbol"] for e in k],
                      [t[1] for t in tiles], [t[2] for t in tiles], [t[3] for t in tiles])
     return ext
 

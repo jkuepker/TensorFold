@@ -19,9 +19,14 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 
-CARVE_VERSION = 1              # bump when the carving or the manifest changes: cached builds then rebuild
-INSTALL = ("pip install mojo --extra-index-url https://whl.modular.com/simple/ (into this venv), or point TF_MOJO at "
-           "the mojo binary")
+# bump when the carving, the manifest or the ``mojo build`` flags change: cached builds then rebuild. The cache key
+# also holds ``mojo --version`` (its commit too); the ``max`` package the kernels import ships version-locked with it
+CARVE_VERSION = 1
+# Mojo releases the kernels are built and tested with, [first, past): a release outside may rename the kernels'
+# symbols or change their arguments
+SUPPORTED = ((1, 1, 0), (1, 2, 0))
+INSTALL = ('pip install "mojo>=1.1,<1.2" "max[all]>=26.6,<26.7" --extra-index-url https://whl.modular.com/simple/ '
+           "(into this venv), or point TF_MOJO at that mojo binary")
 
 
 @lru_cache(maxsize=1)
@@ -35,14 +40,51 @@ def mojo_binary() -> str:
         return named
     found = shutil.which("mojo") or str(Path(sys.executable).parent / "mojo")
     if not os.access(found, os.X_OK):
-        raise RuntimeError(f"TF_ROCM_LANE=mojo needs the Mojo compiler, and none was found: {INSTALL}")
+        raise RuntimeError(f"a TF_ROCM_*=mojo setting needs the Mojo compiler, and none was found: {INSTALL}")
     return found
 
 
 @lru_cache(maxsize=1)
 def mojo_version() -> str:
-    out = subprocess.run([mojo_binary(), "--version"], capture_output=True, text=True, check=True)
+    """``mojo --version``'s line, e.g. ``Mojo 1.1.0 (8189361e)``; a clear error when the compiler does not run."""
+
+    binary = mojo_binary()
+    try:
+        out = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", None) or str(exc)
+        raise RuntimeError(f"{binary} --version failed: {detail.strip()}") from None
     return out.stdout.strip()
+
+
+def _range() -> str:
+    lo, hi = (".".join(map(str, v)) for v in SUPPORTED)
+    return f">= {lo}, < {hi}"
+
+
+def check_version() -> tuple[int, int, int]:
+    """The compiler's version as (major, minor, patch), refused with the supported range when outside it."""
+
+    text = mojo_version()
+    found = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text)
+    if found is None:
+        raise RuntimeError(f"cannot read a version from {mojo_binary()} --version: {text!r}")
+    version = (int(found[1]), int(found[2]), int(found[3] or 0))
+    if not SUPPORTED[0] <= version < SUPPORTED[1]:
+        raise RuntimeError(f"{text} is not supported: TensorFold's Mojo kernels need Mojo {_range()}; {INSTALL}")
+    return version
+
+
+def kernels(manifest: dict, names: list[str] | tuple[str, ...]) -> list[dict]:
+    """``names``' manifest entries in that order; a kernel missing from the build is named with the compiler's version
+    (a release that renames symbols shows here)."""
+
+    have = {e["name"]: e for e in manifest["kernels"]}
+    missing = [n for n in names if n not in have]
+    if missing:
+        raise RuntimeError(f"Mojo kernel(s) {', '.join(missing)} missing from {manifest['source']} built with "
+                           f"{mojo_version()}: unsupported compiler? TensorFold's Mojo kernels need Mojo {_range()}")
+    return [have[n] for n in names]
 
 
 def _build_root() -> Path:
@@ -55,6 +97,7 @@ def build_hsaco(source: Path, arch: str) -> tuple[Path, dict]:
     """``source``'s kernels as .hsaco files for ``arch``: (directory, manifest), built once per source hash."""
 
     source = Path(source)
+    check_version()
     text = source.read_bytes()
     key = hashlib.sha256(b"\0".join([text, mojo_version().encode(), arch.encode(), str(CARVE_VERSION).encode()]))
     out = _build_root() / f"{source.stem}-{arch}-{key.hexdigest()[:16]}"
