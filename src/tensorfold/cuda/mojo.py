@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -62,18 +63,34 @@ def build_hsaco(source: Path, arch: str) -> tuple[Path, dict]:
         return out, json.loads(manifest.read_text())
     from torch.utils.file_baton import FileBaton
 
+    from .build import HINT, LOCK_WAIT_SECONDS, _say, _still_waiting
+
     out.parent.mkdir(parents=True, exist_ok=True)
-    baton = FileBaton(str(out) + ".lock")
+    lock = str(out) + ".lock"
+    baton = FileBaton(lock)
     if baton.try_acquire():
         try:
             if not manifest.is_file():
-                print(f"building Mojo kernels {source.name} for {arch} (first use; later starts reuse them)",
-                      file=sys.stderr, flush=True)
+                _say(f"building Mojo kernels {source.name} for {arch} (first use; later starts reuse them)")
                 _build(source, arch, out)
         finally:
             baton.release()
     else:
-        baton.wait()
+        timer = None
+        try:
+            seen = os.stat(lock)
+        except OSError:                                 # released between the two calls: nothing to wait on
+            seen = None
+        if seen is not None:
+            _say(f"Mojo kernels {source.name} wait on the build lock {lock}; {HINT}")
+            timer = threading.Timer(LOCK_WAIT_SECONDS, _still_waiting, (lock, (seen.st_ino, seen.st_mtime_ns)))
+            timer.daemon = True
+            timer.start()
+        try:
+            baton.wait()
+        finally:
+            if timer is not None:
+                timer.cancel()
     if not manifest.is_file():
         raise RuntimeError(f"building {source.name} with Mojo failed in another process; see its output")
     return out, json.loads(manifest.read_text())
