@@ -170,3 +170,15 @@ def test_mojo_gives_the_hip_bits_on_the_27b_geometry(monkeypatch, p, kv8):
     for w in range(1, 17):
         rows = tuple(x[:w].contiguous() for x in base[:3])
         _same(monkeypatch, (*rows, *base[3:]), [[-1] + list(range(w - 1))], [p], scale=1 / 16, kv8=kv8)
+
+
+@pytest.mark.parametrize("kv8", [False, True])
+@pytest.mark.parametrize("w,p", [(1, 512), (1, 513), (3, 1024), (32, 512)])
+def test_mojo_reads_no_key_past_an_exact_cache(monkeypatch, w, p, kv8):
+    """Caches of exactly ``p`` rows (test_attention's serial rows): a read past the last chunk would fault here."""
+
+    q, kn, vn, kc, vc = _inputs(w, p)
+    kc, vc = (torch.cat((x[:p], x[:0])).contiguous() for x in (kc, vc))
+    inputs = (q, kn, vn, kc, vc)
+    _same(monkeypatch, _fp8(inputs) if kv8 else inputs, [[-1] + list(range(w - 1))], [p], kv8=kv8)
+    torch.cuda.synchronize()

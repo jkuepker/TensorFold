@@ -131,7 +131,7 @@ bf16 caches 0.67-0.92 of HIP's time (worst 128k at 12 rows), packed FP8 0.68-0.9
   four loader waves fill a double buffer (hipcc's tail spills; the Mojo one had 84 bytes, now 28).
 Tried and dropped: four tiles in loader registers instead of two (no gain at 12 rows, the FP8 pipe kernel spilled),
 nontemporal key/value loads (2-5% slower). At 12 rows the shared kernel reaches ~470-490 GB/s against ~600 at one
-row: there the five compute waves' WMMA chains and softmax, not the loads, set the pace.
+row; likely the five compute waves' WMMA chains and softmax set the pace there (inferred, not profiled).
 
 Tests: test_attention_rocm_mojo.py 43 passed; with `TF_ROCM_LANE=mojo TF_ROCM_TREE_KERNEL=mojo` the attention, draft,
 GLM draft ring and Qwen27 GPU tests plus test_cuda_build/test_cuda_kv8 give 399 passed, 4 failed, 3 errors, the same
