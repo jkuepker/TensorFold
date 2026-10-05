@@ -92,3 +92,48 @@ The two-tile kernel (rows 17-32, not in the acceptance rows) is 66-108% of HIP's
 24 rows 3-8% slower; run to run they vary by a few percent).
 Absolute GB/s reach ~670, above the card's nominal ~640: some MALL reuse between rotated copies is likely, so
 compare the lanes by ratio.
+
+## Phase 3: the decode tree attention in Mojo (`TF_ROCM_TREE_KERNEL=mojo`)
+
+`src/tensorfold/cuda/kernels/attention_rocm.mojo` ports `attention_rocm.cu`'s `shared_kernel` (all four PIPE x KV8
+instantiations: `shared_pipe`, `shared_pipe8`, `shared_flat`, `shared_flat8`), `tail_kernel` (`tail16`, `tail8`) and
+attention.py's Triton `_merge` (`merge`). `attention_rocm_mojo.cu` loads the code objects (built at first use by
+`cuda/mojo.py`, cached by source hash) and launches them with hipModuleLaunchKernel on torch's current stream, with
+`tree_shared`'s and `tree_tail`'s grids and `rocm_launch`'s compute waves and schedule; `attention.py` routes
+`TF_ROCM_TREE_KERNEL=mojo` there (the default is unchanged). `_paths` and prompt attention stay as they are.
+
+Bits: the partials (o, m, l) of the shared and tail kernels and the merged rows equal the HIP kernels' (and Triton's
+merge) on every head-size-256 case of test_attention.py (trees and chains, 1, 2, 5, 8 compute waves with and without
+loader waves, several streams in one launch, padded plans, strided node values), and on the 27B's geometry (24 query
+heads, 4 KV heads, 256) at 1,013, 16,371 and 64,007 committed keys with 1-16 verify rows, bf16 and packed FP8 caches
+(tests/cuda/test_attention_rocm_mojo.py). What it took (from the ISA of hipcc's and Triton's code objects):
+- Mojo contracts `a * b + c` into an fma by default (hipcc too, Triton at the backend), so every step is written
+  out: the fold's `l = fma(l, alpha, sum)`, the merge's `o = fma(o, a, b * co)` and `l = fma(cl, b, l * a)`;
+- HIP's `__expf` is `v_exp_f32(x * log2e)` (`llvm.amdgcn.exp2`), Triton's `tl.exp` is `llvm.exp2`'s range-reduced
+  lowering with the multiply fused into the scaling add: `ldexp(v_exp(fma(x, log2e, x*log2e < -126 ? 64 : 0)), ...)`;
+- the merge's division is precise (`v_div_scale/fmas/fixup` in both), bf16 nearest even with NaN as 0x7FFF;
+- running max as `llvm.maxnum` (`v_max_num`), the tile layout and WMMA operand order as the HIP kernel's.
+
+Speed (attn_bench.py, attn_bench_results.txt; cold KV, graph-replayed, one attention call = shared + tail + merge):
+bf16 caches 0.67-0.92 of HIP's time (worst 128k at 12 rows), packed FP8 0.68-0.96; the merge 0.55-0.97, the tail
+1.00-1.08 (+0.3 us). What it took from a literal port (shared kernel 1.7x slower at 12 rows, every kernel spilling):
+- loads from a wave-uniform base at a 32-bit byte offset: `global_load_b128 v, voff, s[base]`, no 64-bit address
+  math a piece (hipcc's has a v_mad_co_u64_u32 per piece);
+- the LDS operand base per lane hoisted, so the 16 K and 16 V reads a tile take immediate offsets (an address
+  computed as `(base + 256 n) >> 1` kept 16 address registers, which spilled the query);
+- no SIMD vector merged across branches: a conditional insert into a 16-wide register vector became a phi that LLVM
+  shuffled with dozens of moves and `s_wait_loadcnt` between loads (each load waited on the last). The flat stage
+  branches once on its wave's piece count (a wave-uniform count via readfirstlane: pieces and blocks are multiples
+  of 32) and loads and places in the same branch; the packed stage, where that form spilled, guards per piece;
+- V transposed by the load (`global_load_tr_b128`): 8 keys of one dim land in a lane, one `ds_store_b128` a piece
+  instead of eight `ds_store_b16` (bf16 only; ~1%);
+- the tail's piece loads branch-free (one address select, one load, a zero select), and a fifth wave folds while
+  four loader waves fill a double buffer (hipcc's tail spills; the Mojo one had 84 bytes, now 28).
+Tried and dropped: four tiles in loader registers instead of two (no gain at 12 rows, the FP8 pipe kernel spilled),
+nontemporal key/value loads (2-5% slower). At 12 rows the shared kernel reaches ~470-490 GB/s against ~600 at one
+row: there the five compute waves' WMMA chains and softmax, not the loads, set the pace.
+
+Tests: test_attention_rocm_mojo.py 43 passed; with `TF_ROCM_LANE=mojo TF_ROCM_TREE_KERNEL=mojo` the attention, draft,
+GLM draft ring and Qwen27 GPU tests plus test_cuda_build/test_cuda_kv8 give 399 passed, 4 failed, 3 errors, the same
+as with `TF_ROCM_TREE_KERNEL=wmma` (test_glm_draft_ring's flat-buffer bits and the GLM experts extension not
+building in this image).
