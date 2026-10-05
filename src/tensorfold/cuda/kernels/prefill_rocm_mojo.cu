@@ -74,3 +74,26 @@ void gemm(const at::Tensor& x, const at::Tensor& w, at::Tensor& out, int which) 
     TF_HIP_CHECK(hipModuleLaunchKernel(kn.fn, (m + kn.bm - 1) / kn.bm, (n + kn.bn - 1) / kn.bn, 1, kn.threads, 1, 1, 0,
                                        at::hip::getCurrentHIPStream().stream(), args, nullptr));
 }
+
+// prefill_matmul8: x8 (M, K) e4m3 bytes, xs (M, K/64) bf16 group sums, a (M) fp32 row scales, w8 (N, K) e4m3 codes,
+// tiled scales and biases -> out (M, N) bf16 or fp32 with kernel ``which``.
+void gemm8(const at::Tensor& x8, const at::Tensor& xs, const at::Tensor& a, const at::Tensor& w8,
+           const at::Tensor& scales, const at::Tensor& biases, at::Tensor& out, int which) {
+    const auto& k = kernels();
+    TORCH_CHECK(which >= 0 && which < static_cast<int>(k.size()), "the Mojo prompt GEMM's kernels are not loaded");
+    const Kernel& kn = k[which];
+    int m = x8.size(0), n = out.size(1), kk = x8.size(1);
+    TORCH_CHECK(kk % 64 == 0 && w8.size(1) == kk && xs.size(1) == kk / 64, "FP8 prompt GEMM: K a multiple of 64");
+    if (m == 0 || n == 0) return;
+    int f32 = out.scalar_type() == at::kFloat ? 1 : 0;
+    void* xp = x8.data_ptr();
+    void* sp = xs.data_ptr();
+    void* ap = a.data_ptr();
+    void* wp = w8.data_ptr();
+    void* scp = scales.data_ptr();
+    void* bp = biases.data_ptr();
+    void* op = out.data_ptr();
+    void* args[] = {&xp, &sp, &ap, &wp, &scp, &bp, &op, &m, &n, &kk, &f32};
+    TF_HIP_CHECK(hipModuleLaunchKernel(kn.fn, (m + kn.bm - 1) / kn.bm, (n + kn.bn - 1) / kn.bn, 1, kn.threads, 1, 1, 0,
+                                       at::hip::getCurrentHIPStream().stream(), args, nullptr));
+}

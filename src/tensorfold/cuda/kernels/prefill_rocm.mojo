@@ -142,12 +142,21 @@ def gemm_body[BM: Int, BN: Int, TM: Int, TN: Int, KS: Int](
             fetch[BM, KS, T](xr, x, m0, m, k, UInt32(kt + 1) * UInt32(KS), tid)
             fetch[BN, KS, T](wr, w, n0, n, k, UInt32(kt + 1) * UInt32(KS), tid)
         steps[KS, FM, FN](acc, lds + lx, lds + lw)
-    # outputs: input row m0 + wm + 16 b + c, outputs n0 + wn + 16 a + 8 h .. + 7
+    store_tiles[FM, FN](acc, dst, m0 + wm, n0 + wn, c, h, m, n, f32)
+
+
+# A wave's sums to the output: fragment (a, b) holds input row r0 + 16 b + c, outputs c0 + 16 a + 8 h .. + 7; fp32,
+# or bf16 nearest even (NaN as 0x7FFF).
+@always_inline
+def store_tiles[FM: Int, FN: Int](
+    acc: SIMD[F32, 8 * FM * FN], dst: U16Ptr, r0: UInt32, c0: UInt32, c: UInt32, h: UInt32, m: UInt32, n: UInt32,
+    f32: Int32,
+):
     comptime for a in range(FN):
         comptime for b in range(FM):
             comptime at = 8 * (a * FM + b)
-            var r = m0 + wm + UInt32(16 * b) + c
-            var col = n0 + wn + UInt32(16 * a) + 8 * h
+            var r = r0 + UInt32(16 * b) + c
+            var col = c0 + UInt32(16 * a) + 8 * h
             if r < m:
                 var o = r * n + col
                 if f32 != 0:
@@ -186,6 +195,165 @@ def gemm_256x128(x: U16Ptr, w: U16Ptr, dst: U16Ptr, m: Int32, n: Int32, k: Int32
     gemm_body[256, 128, 64, 64, 64](x, w, dst, m, n, k, f32)
 
 
+# The FP8 prompt GEMM (qmm_groups.py's Triton ``_gemm8``): out = a * (sum over 64-input groups g, in order, of
+# dot(x8, w8) * s + xs . b), x8 prefill_glue's e4m3 rows, w8 the weight's codes as e4m3 (``_nibbles8``), s and b the
+# tiled scales and biases, xs the rows' bf16 group sums, a the row scales. As Triton compiles it: a group's dot is
+# four chained v_wmma_f32_16x16x16_fp8_fp8 from zero (the weight as A), folded as acc = fma(p, s, acc); then the
+# bias as v_wmma_f32_16x16x16_bf16 over 16 groups a step (A: b at 16 groups of an output, B: xs, zeros past the
+# groups), then acc * a, rounded as the bf16 GEMM's. K is staged KS bytes (KS / 64 groups) at a time.
+@always_inline
+def wmma8(a: SIMD[U32, 2], b: SIMD[U32, 2], c: SIMD[F32, 8]) -> SIMD[F32, 8]:
+    return llvm_intrinsic["llvm.amdgcn.wmma.f32.16x16x16.fp8.fp8.v8f32.v2i32", SIMD[F32, 8]](
+        bitcast[DType.int32, 2](a), bitcast[DType.int32, 2](b), c
+    )
+
+
+@always_inline
+def bf16x8(v: SIMD[U32, 4]) -> SIMD[F32, 8]:  # 8 packed bf16 as fp32, element i the i-th
+    var f = SIMD[F32, 8](0)
+    comptime for i in range(4):
+        f[2 * i] = bitcast[F32, 1](v[i] << 16)
+        f[2 * i + 1] = bitcast[F32, 1](v[i] & 0xFFFF0000)
+    return f
+
+
+@always_inline
+def gemm8_body[BM: Int, BN: Int, TM: Int, TN: Int, KS: Int](
+    x8: U16Ptr, xs: U16Ptr, ra: FPtr, w8: U16Ptr, sc: U16Ptr, bi: U16Ptr, dst: U16Ptr, m32: Int32, n32: Int32,
+    k32: Int32, f32: Int32,
+):
+    comptime E = KS // 2  # 16-bit elements a staged row (the rows are bytes; staged as pairs)
+    comptime ROWB = KS + 16  # bytes a staged row: 16 of padding
+    comptime GS = KS // 64  # groups a stage
+    comptime WM = BM // TM
+    comptime T = 32 * WM * (BN // TN)
+    comptime XP = BM * E // 8 // T
+    comptime WP = BN * E // 8 // T
+    comptime FM = TM // 16
+    comptime FN = TN // 16
+    comptime TILE = (BM + BN) * ROWB // 4  # uint32 a staged step
+    var lds = stack_allocation[TILE, UInt32, alignment=16, address_space=AddressSpace.SHARED]()
+    var m = UInt32(m32)
+    var n = UInt32(n32)
+    var k = UInt32(k32)
+    var kg = k // 64
+    var ke = k // 2  # a row's 16-bit elements
+    var tid = UInt32(thread_idx.x)
+    var lane = tid & 31
+    var wave = tid >> 5
+    var c = lane & 15
+    var h = lane >> 4
+    var m0 = UInt32(block_idx.x) * UInt32(BM)
+    var n0 = UInt32(block_idx.y) * UInt32(BN)
+    var wm = (wave % UInt32(WM)) * UInt32(TM)
+    var wn = (wave // UInt32(WM)) * UInt32(TN)
+    var acc = SIMD[F32, 8 * FM * FN](0)
+    var xr = SIMD[U32, 4 * XP](0)
+    var wr = SIMD[U32, 4 * WP](0)
+    var nsteps = k // UInt32(KS)
+    # the lane's fragment rows in a staged step (uint32 offsets): input row wm + c, output wn + c, both at byte 8h
+    var lx = Int(((wm + c) * UInt32(ROWB) + 8 * h) // 4)
+    var lw = BM * ROWB // 4 + Int(((wn + c) * UInt32(ROWB) + 8 * h) // 4)
+    # this lane's scales: tile a's outputs n0 + wn + 16 a + 8h .. + 7 sit at ((col / 16) kg + g) 16 + 8h .. + 7
+    var sbase = SIMD[U32, FN](0)
+    comptime for a in range(FN):
+        var col = min(n0 + wn + UInt32(16 * a), ((n + 15) // 16 - 1) * 16)  # tiles past N read the last one
+        sbase[a] = (col // 16) * kg * 16 + 8 * h
+    fetch[BM, E, T](xr, x8, m0, m, ke, 0, tid)
+    fetch[BN, E, T](wr, w8, n0, n, ke, 0, tid)
+    for kt in range(Int(nsteps)):
+        barrier()
+        put[BM, E, T](lds, xr, tid)
+        put[BN, E, T](lds + BM * ROWB // 4, wr, tid)
+        barrier()
+        var g0 = UInt32(kt) * UInt32(GS)
+        var sv = SIMD[U32, 4 * FN * GS](0)  # the stage's scales, before the next step's loads
+        comptime for gi in range(GS):
+            comptime for a in range(FN):
+                sv = sv.insert[offset=4 * (a * GS + gi)](ld4(sc, sbase[a] + (g0 + UInt32(gi)) * 16))
+        if UInt32(kt) + 1 < nsteps:
+            fetch[BM, E, T](xr, x8, m0, m, ke, UInt32(kt + 1) * UInt32(E), tid)
+            fetch[BN, E, T](wr, w8, n0, n, ke, UInt32(kt + 1) * UInt32(E), tid)
+        comptime for gi in range(GS):
+            # the group's input fragments once; then a weight tile at a time (its 4 K steps' fragments, its scales,
+            # its FM chains), sched barriers keeping each tile's registers to itself
+            var bf = SIMD[U32, 8 * FM](0)  # tile b, K step s at 2 (4 b + s)
+            comptime for b in range(FM):
+                comptime for st in range(4):
+                    bf = bf.insert[offset=2 * (4 * b + st)](
+                        (lds + lx + (16 * b * ROWB + 64 * gi + 16 * st) // 4).load[width=2, alignment=8]()
+                    )
+            comptime for a in range(FN):
+                var af = SIMD[U32, 8](0)
+                comptime for st in range(4):
+                    af = af.insert[offset=2 * st](
+                        (lds + lw + (16 * a * ROWB + 64 * gi + 16 * st) // 4).load[width=2, alignment=8]()
+                    )
+                var s8 = bf16x8(sv.slice[4, offset=4 * (a * GS + gi)]())
+                comptime for b in range(FM):
+                    var p = SIMD[F32, 8](0)
+                    comptime for st in range(4):
+                        p = wmma8(af.slice[2, offset=2 * st](), bf.slice[2, offset=2 * (4 * b + st)](), p)
+                    comptime at = 8 * (a * FM + b)
+                    acc = acc.insert[offset=at](p.fma(s8, acc.slice[8, offset=at]()))
+                llvm_intrinsic["llvm.amdgcn.sched.barrier", NoneType](Int32(0))
+    # the bias: A = b at 16 groups of output wn + 16 a + c, B = xs of row wm + 16 b + c, zeros past the groups
+    var kb = UInt32(0)
+    while kb < kg:
+        var af = SIMD[U32, 4 * FN](0)
+        var bf = SIMD[U32, 4 * FM](0)
+        comptime for a in range(FN):
+            var col = n0 + wn + UInt32(16 * a) + c
+            var v = SIMD[U32, 4](0)
+            if col < n:
+                var base = (col // 16) * kg * 16 + col % 16
+                comptime for j in range(8):
+                    var g = kb + 8 * h + UInt32(j)
+                    var e = UInt32(bi[Int(base + g * 16)]) if g < kg else UInt32(0)
+                    v[j // 2] = v[j // 2] | (e << UInt32(16 * (j % 2)))
+            af = af.insert[offset=4 * a](v)
+        comptime for b in range(FM):
+            var r = m0 + wm + UInt32(16 * b) + c
+            var v = SIMD[U32, 4](0)
+            if r < m:
+                comptime for j in range(8):
+                    var g = kb + 8 * h + UInt32(j)
+                    var e = UInt32(xs[Int(r * kg + g)]) if g < kg else UInt32(0)
+                    v[j // 2] = v[j // 2] | (e << UInt32(16 * (j % 2)))
+            bf = bf.insert[offset=4 * b](v)
+        comptime for a in range(FN):
+            comptime for b in range(FM):
+                comptime at = 8 * (a * FM + b)
+                acc = acc.insert[offset=at](
+                    wmma(af.slice[4, offset=4 * a](), bf.slice[4, offset=4 * b](), acc.slice[8, offset=at]())
+                )
+        kb += 16
+    comptime for b in range(FM):  # the row scale: lane row wm + 16 b + c
+        var r = min(m0 + wm + UInt32(16 * b) + c, m - 1)
+        var av = ra[Int(r)]
+        comptime for a in range(FN):
+            comptime at = 8 * (a * FM + b)
+            acc = acc.insert[offset=at](acc.slice[8, offset=at]() * SIMD[F32, 8](av))
+    store_tiles[FM, FN](acc, dst, m0 + wm, n0 + wn, c, h, m, n, f32)
+
+
+# 8 waves of 64 rows by 32 outputs: 64 x 64 waves (as Triton's) hold 16 group dots at once and spill in Mojo
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
+def gemm8_128x128(
+    x8: U16Ptr, xs: U16Ptr, ra: FPtr, w8: U16Ptr, sc: U16Ptr, bi: U16Ptr, dst: U16Ptr, m: Int32, n: Int32, k: Int32,
+    f32: Int32,
+):
+    gemm8_body[128, 128, 64, 32, 64](x8, xs, ra, w8, sc, bi, dst, m, n, k, f32)
+
+
+@__llvm_metadata(MAX_THREADS_PER_BLOCK_METADATA=StaticTuple[Int32, 1](256))
+def gemm8_128x128w(
+    x8: U16Ptr, xs: U16Ptr, ra: FPtr, w8: U16Ptr, sc: U16Ptr, bi: U16Ptr, dst: U16Ptr, m: Int32, n: Int32, k: Int32,
+    f32: Int32,
+):
+    gemm8_body[128, 128, 64, 32, 128](x8, xs, ra, w8, sc, bi, dst, m, n, k, f32)
+
+
 @export
 def tf_prefill_instantiate(a: Int) abi("C") -> Int:
     try:
@@ -195,6 +363,9 @@ def tf_prefill_instantiate(a: Int) abi("C") -> Int:
         ctx.enqueue_function[gemm_128x128](u, u, u, z, z, z, z, grid_dim=1, block_dim=128)
         ctx.enqueue_function[gemm_128x256](u, u, u, z, z, z, z, grid_dim=1, block_dim=256)
         ctx.enqueue_function[gemm_256x128](u, u, u, z, z, z, z, grid_dim=1, block_dim=256)
+        var f = FPtr(unsafe_from_address=a)
+        ctx.enqueue_function[gemm8_128x128](u, u, f, u, u, u, u, z, z, z, z, grid_dim=1, block_dim=256)
+        ctx.enqueue_function[gemm8_128x128w](u, u, f, u, u, u, u, z, z, z, z, grid_dim=1, block_dim=256)
         return 0
     except:
         return 1

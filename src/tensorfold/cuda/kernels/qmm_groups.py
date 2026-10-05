@@ -282,7 +282,7 @@ def reload_settings() -> None:
     """Read the ``TF_ROCM_*`` tuning variables again (cached: the lane matmul runs hundreds of times a step)."""
 
     for f in (lane_config, lane_kernel, prefill_config, prefill8_config, prefill8_group, prefill_gemm,
-              prefill_mojo_tile, wmma_fill):
+              prefill8_gemm, prefill_mojo_tile, prefill8_mojo_tile, wmma_fill):
         f.cache_clear()
 
 
@@ -377,11 +377,13 @@ def dequantize(words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, 
 # Mojo prompt GEMM tiles: (kernel, rows a block, outputs a block, threads a block); never a bit of the output
 PREFILL_TILES = {"128x256": ("gemm_128x256", 128, 256, 256), "256x128": ("gemm_256x128", 256, 128, 256),
                  "128x128": ("gemm_128x128", 128, 128, 128)}
+# the FP8 prompt GEMM's: K staged one group (64 bytes) a step, or two ("w")
+PREFILL8_TILES = {"128x128": ("gemm8_128x128", 128, 128, 256), "128x128w": ("gemm8_128x128w", 128, 128, 256)}
 
 
 @lru_cache(maxsize=1)
 def prefill_gemm() -> str:
-    """The prompt GEMM after the weight's bf16 rounding: ``triton`` (``_gemm``, the default) or ``mojo``
+    """The bf16 prompt GEMM after the weight's rounding: ``triton`` (``_gemm``, the default) or ``mojo``
     (``prefill_rocm.mojo``: the same WMMA chain over K, the same bits, built at first use by the ``mojo`` compiler);
     ``TF_ROCM_PREFILL_GEMM`` picks it."""
 
@@ -397,6 +399,24 @@ def prefill_gemm() -> str:
 
 
 @lru_cache(maxsize=1)
+def prefill8_gemm() -> str:
+    """The FP8 prompt GEMM (--prefill-fp8): ``triton`` (``_gemm8``, the default) or ``mojo`` (``prefill_rocm.mojo``'s
+    gemm8: the same WMMA chains and folds in the same order, the same bits); ``TF_ROCM_PREFILL8_GEMM`` picks it. Apart
+    from ``TF_ROCM_PREFILL_GEMM`` because the Mojo FP8 kernel measured 1-24% slower than Triton's on the 27B's shapes
+    (tools/mojo_gate/prefill_bench_results.txt)."""
+
+    kind = os.environ.get("TF_ROCM_PREFILL8_GEMM") or "triton"
+    if kind not in ("triton", "mojo"):
+        raise ValueError("TF_ROCM_PREFILL8_GEMM: triton or mojo")
+    if kind == "mojo":
+        from tensorfold.cuda.build import wmma
+
+        if not wmma("TF_ROCM_PREFILL8_GEMM"):
+            raise ValueError("TF_ROCM_PREFILL8_GEMM=mojo: the Mojo prompt GEMM builds for gfx12 GPUs only")
+    return kind
+
+
+@lru_cache(maxsize=1)
 def prefill_mojo_tile() -> int:
     """The Mojo prompt GEMM's tile (``TF_ROCM_PREFILL_TILE``, rows x outputs a block): scheduling only, never bits."""
 
@@ -404,6 +424,16 @@ def prefill_mojo_tile() -> int:
     if name not in PREFILL_TILES:
         raise ValueError(f"TF_ROCM_PREFILL_TILE: one of {', '.join(PREFILL_TILES)}")
     return list(PREFILL_TILES).index(name)
+
+
+@lru_cache(maxsize=1)
+def prefill8_mojo_tile() -> int:
+    """The Mojo FP8 prompt GEMM's tile (``TF_ROCM_PREFILL8_TILE``), as the launcher's index: scheduling only."""
+
+    name = os.environ.get("TF_ROCM_PREFILL8_TILE") or "128x128"
+    if name not in PREFILL8_TILES:
+        raise ValueError(f"TF_ROCM_PREFILL8_TILE: one of {', '.join(PREFILL8_TILES)}")
+    return len(PREFILL_TILES) + list(PREFILL8_TILES).index(name)
 
 
 @lru_cache(maxsize=1)
@@ -420,7 +450,7 @@ def _prefill_mojo():
                                                                str(here / "prefill_rocm_mojo.cu")],
                extra_cuda_cflags=["-O3"], verbose=False)
     k = {e["name"]: e for e in manifest["kernels"]}
-    tiles = list(PREFILL_TILES.values())
+    tiles = list(PREFILL_TILES.values()) + list(PREFILL8_TILES.values())
     ext.load_kernels([str(built / k[t[0]]["hsaco"]) for t in tiles], [k[t[0]]["symbol"] for t in tiles],
                      [t[1] for t in tiles], [t[2] for t in tiles], [t[3] for t in tiles])
     return ext
@@ -438,6 +468,8 @@ def prefill_matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, b
     m = x.shape[0]
     w = dequantize(words, scales, biases, n)
     if prefill_gemm() == "mojo":
+        if x.data_ptr() % 16:
+            x = x.clone()                                # rows are read in 16-byte pieces
         out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
         _prefill_mojo().gemm(x, w, out, prefill_mojo_tile())
         return out
@@ -548,6 +580,11 @@ def prefill_matmul8(x: tuple[torch.Tensor, torch.Tensor, torch.Tensor], words: t
     m = x8.shape[0]
     w8 = _buffer(words.device, n * k).view(n, k)
     _nibbles8[(kg, triton.cdiv(n, 64))](words, w8, N=n, K=k, BLOCK_N=64, num_warps=4)
+    if prefill8_gemm() == "mojo":
+        out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)
+        x8 = x8 if x8.data_ptr() % 16 == 0 and x8.is_contiguous() else x8.contiguous().clone()
+        _prefill_mojo().gemm8(x8, xs.contiguous(), a.contiguous(), w8, scales, biases, out, prefill8_mojo_tile())
+        return out
     bm, bn, warps, stages = prefill8_config()
     out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)
     _gemm8[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](x8, xs, a, w8, scales, biases, out, m, N=n, K=k, BM=bm, BN=bn,
@@ -557,5 +594,6 @@ def prefill_matmul8(x: tuple[torch.Tensor, torch.Tensor, torch.Tensor], words: t
 
 
 __all__ = ["bucket", "dequantize", "from_groups", "gemv", "group_sums", "lane_config", "lane_kernel", "matmul",
-           "prefill8_config", "prefill8_group", "prefill_config", "prefill_gemm", "prefill_matmul", "prefill_matmul8",
+           "prefill8_config", "prefill8_gemm", "prefill8_group", "prefill_config", "prefill_gemm", "prefill_matmul",
+           "prefill_matmul8",
            "reload_settings", "split_k", "to_groups", "wmma_fill"]

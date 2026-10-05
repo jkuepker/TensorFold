@@ -11,7 +11,10 @@ chunks: the last chunk of a 4k, 16k and 30k prompt, plus the first), bf16 or pac
 rocm_rows picks them. Effective TFLOPS = 4 H D (W p0 + W (W + 1) / 2) / time: QK^T and PV over the keys each row
 attends (causal), the masked part of the diagonal tiles not counted.
 
-usage (container, slot): PYTHONPATH=src python3 tools/mojo_gate/prefill_bench.py gemm [--rows 2341] [--tiles ...]
+gemm8: the FP8 prompt GEMM (Triton ``_gemm8`` vs the Mojo gemm8 kernels) on e4m3 rows and the weight's e4m3 codes,
+the codes' widening (``_nibbles8``) left out of both; TFLOPS as for gemm.
+
+usage (container, slot): PYTHONPATH=src python3 tools/mojo_gate/prefill_bench.py gemm|gemm8 [--rows 2341] [--tiles ..]
                          PYTHONPATH=src python3 tools/mojo_gate/prefill_bench.py attn
 """
 
@@ -83,6 +86,44 @@ def bench_gemm(rows: list[int], tiles: list[str]) -> None:
             print(line, flush=True)
 
 
+def bench_gemm8(rows: list[int], tiles: list[str]) -> None:
+    ext = qmm_groups._prefill_mojo()
+    names = list(qmm_groups.PREFILL8_TILES)           # launcher index: after the bf16 tiles
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    print(f"{'shape':<18} {'N':>6} {'K':>6} {'M':>5} {'triton':>14}" + "".join(f" {'mojo ' + t:>22}" for t in tiles))
+    for m in rows:
+        for name, n, k in SHAPES:
+            words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda",
+                                  dtype=torch.int64).to(torch.int32)
+            scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.003 + 0.001).bfloat16()
+            biases = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.003 - 0.0015).bfloat16()
+            words, scales, biases = qmm_groups.to_groups(words, scales, biases)
+            w8 = torch.empty((n, k), dtype=torch.uint8, device="cuda")
+            qmm_groups._nibbles8[(k // 64, triton.cdiv(n, 64))](words, w8, N=n, K=k, BLOCK_N=64, num_warps=4)
+            x = torch.randn(m, k, generator=gen, device="cuda")
+            a = x.abs().amax(1) / 448.0
+            x8 = (x / a[:, None]).to(torch.float8_e4m3fn).view(torch.uint8).contiguous()
+            xs = (x.view(m, k // 64, 64).sum(2) / a[:, None]).bfloat16()
+            ref = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
+            bm, bn, warps, stages = qmm_groups.prefill8_config()
+
+            def tri():
+                qmm_groups._gemm8[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+                    x8, xs, a, w8, scales, biases, ref, m, N=n, K=k, BM=bm, BN=bn, KB=16,
+                    GROUP=qmm_groups.prefill8_group(), num_warps=warps, num_stages=stages)
+
+            outs = [torch.empty_like(ref) for _ in tiles]
+            fns = [tri] + [(lambda o, which: (lambda: ext.gemm8(x8, xs, a, w8, scales, biases, o, which)))(
+                o, len(qmm_groups.PREFILL_TILES) + names.index(t)) for o, t in zip(outs, tiles)]
+            t_ref, *t_mojo = timed(fns)
+            flops = 2 * m * n * k
+            line = f"{name:<18} {n:6d} {k:6d} {m:5d} {t_ref * 1e6:7.0f}us {flops / t_ref / 1e12:5.1f}T"
+            for o, t_m in zip(outs, t_mojo):
+                same = torch.equal(ref, o)
+                line += f" {t_m * 1e6:7.0f}us {flops / t_m / 1e12:5.1f}T x{t_ref / t_m:4.2f}{'' if same else ' BITS!'}"
+            print(line, flush=True)
+
+
 ATTN_CHUNKS = [("4k first", 0, 2048), ("4k last", 2048, 2048), ("16k first", 0, 2340), ("16k last", 14043, 2341),
                ("30k first", 0, 2500), ("30k last", 27500, 2500)]
 
@@ -117,14 +158,18 @@ def bench_attn() -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["gemm", "attn"])
+    ap.add_argument("what", choices=["gemm", "gemm8", "attn"])
     ap.add_argument("--rows", default="2341")
-    ap.add_argument("--tiles", default=",".join(qmm_groups.PREFILL_TILES))
+    ap.add_argument("--tiles", default="")
     args = ap.parse_args()
     props = torch.cuda.get_device_properties(0)
     print(f"{props.name} pci_bus_id={props.pci_bus_id} {props.gcnArchName}")
     if args.what == "gemm":
-        bench_gemm([int(r) for r in args.rows.split(",")], args.tiles.split(","))
+        bench_gemm([int(r) for r in args.rows.split(",")],
+                   (args.tiles or ",".join(qmm_groups.PREFILL_TILES)).split(","))
+    elif args.what == "gemm8":
+        bench_gemm8([int(r) for r in args.rows.split(",")],
+                    (args.tiles or ",".join(qmm_groups.PREFILL8_TILES)).split(","))
     elif args.what == "attn":
         bench_attn()
 
