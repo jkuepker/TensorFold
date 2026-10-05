@@ -445,21 +445,29 @@ def prefill8_mojo_tile() -> int:
 
 
 @lru_cache(maxsize=1)
-def _prefill_mojo():
-    """The Mojo prompt GEMM's launcher with its kernels loaded: ``prefill_rocm.mojo`` built to code objects at first
-    use (cached by its hash), launched with hipModuleLaunchKernel on torch's current stream."""
-
-    from tensorfold.cuda.build import hip_arch, load
-    from tensorfold.cuda.mojo import build_hsaco
+def _prefill_mojo_ext():
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    built, manifest = build_hsaco(here / "prefill_rocm.mojo", hip_arch())
-    ext = load(name="tensorfold_prefill_rocm_mojo_v1", sources=[str(here / "prefill_rocm_mojo.cpp"),
-                                                               str(here / "prefill_rocm_mojo.cu")],
-               extra_cuda_cflags=["-O3"], verbose=False)
+    return load(name="tensorfold_prefill_rocm_mojo_v2", sources=[str(here / "prefill_rocm_mojo.cpp"),
+                                                                str(here / "prefill_rocm_mojo.cu")],
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=None)
+def _prefill_mojo(device: int):
+    """The Mojo prompt GEMM's launcher with its kernels loaded on GPU ``device``: ``prefill_rocm.mojo`` built to code
+    objects at first use (cached by its hash and the GPU's architecture, so same-architecture cards share them),
+    launched with hipModuleLaunchKernel on torch's current stream of the tensors' GPU."""
+
+    from tensorfold.cuda.build import hip_arch
+    from tensorfold.cuda.mojo import build_hsaco
+
+    built, manifest = build_hsaco(Path(__file__).parent / "prefill_rocm.mojo", hip_arch(device))
+    ext = _prefill_mojo_ext()
     k = {e["name"]: e for e in manifest["kernels"]}
     tiles = list(PREFILL_TILES.values()) + list(PREFILL8_TILES.values())
-    ext.load_kernels([str(built / k[t[0]]["hsaco"]) for t in tiles], [k[t[0]]["symbol"] for t in tiles],
+    ext.load_kernels(device, [str(built / k[t[0]]["hsaco"]) for t in tiles], [k[t[0]]["symbol"] for t in tiles],
                      [t[1] for t in tiles], [t[2] for t in tiles], [t[3] for t in tiles])
     return ext
 
@@ -479,7 +487,7 @@ def prefill_matmul(x: torch.Tensor, words: torch.Tensor, scales: torch.Tensor, b
         if x.data_ptr() % 16:
             x = x.clone()                                # rows are read in 16-byte pieces
         out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
-        _prefill_mojo().gemm(x, w, out, prefill_mojo_tile())
+        _prefill_mojo(x.get_device()).gemm(x, w, out, prefill_mojo_tile())
         return out
     bm, bn, bk, warps, stages = prefill_config()
     if k % bk:
@@ -591,7 +599,7 @@ def prefill_matmul8(x: tuple[torch.Tensor, torch.Tensor, torch.Tensor], words: t
     if prefill8_gemm() == "mojo":
         out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)
         x8 = x8 if x8.data_ptr() % 16 == 0 and x8.is_contiguous() else x8.contiguous().clone()
-        _prefill_mojo().gemm8(x8, xs.contiguous(), a.contiguous(), w8, scales, biases, out, prefill8_mojo_tile())
+        _prefill_mojo(x8.get_device()).gemm8(x8, xs.contiguous(), a.contiguous(), w8, scales, biases, out, prefill8_mojo_tile())
         return out
     bm, bn, warps, stages = prefill8_config()
     out = torch.empty((m, n), dtype=torch.float32 if f32 else torch.bfloat16, device=x8.device)

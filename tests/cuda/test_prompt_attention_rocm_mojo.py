@@ -78,3 +78,28 @@ def test_mojo_prompt_attention_is_routed_by_tf_rocm_attn_kernel(monkeypatch):
         outs.append(prefill_attention.attention(q, k, v, 400, scale=D ** -0.5))
     prefill_attention._rocm_kernel.cache_clear()
     assert torch.equal(outs[0], outs[1])
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_mojo_prompt_attention_gives_the_hip_bits_on_each_gpu():
+    """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its
+    tensors' GPU."""
+
+    for packed in (False, True):
+        for dev in (0, 1, 0):
+            with torch.cuda.device(dev):
+                gen = torch.Generator(device="cuda").manual_seed(5)
+                k, v = _caches(gen, 1129, 4, packed)
+                q = (torch.randn(129, 24, D, generator=gen, device="cuda") * 1.5).bfloat16()
+                ref, got = _both(q, k, v, 1000, 1, True)
+                assert torch.equal(ref.view(torch.int16), got.view(torch.int16)), (dev, packed)
+        with torch.cuda.device(1):
+            gen = torch.Generator(device="cuda").manual_seed(5)
+            k, v = _caches(gen, 1129, 4, packed)
+            q = (torch.randn(129, 24, D, generator=gen, device="cuda") * 1.5).bfloat16()
+            ref = torch.empty_like(q)
+            prefill_attention._rocm().attention(q, k, v, ref, 1000, D ** -0.5, 1, True)
+        with torch.cuda.device(0):
+            got = torch.empty_like(q)
+            tree._mojo(q.get_device()).attention(q, k, v, got, 1000, D ** -0.5, 1, True)
+        assert torch.equal(ref.view(torch.int16), got.view(torch.int16)), packed

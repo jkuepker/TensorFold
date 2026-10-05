@@ -64,7 +64,7 @@ def triton_gemm(x, w, out):
 
 
 def bench_gemm(rows: list[int], tiles: list[str]) -> None:
-    ext = qmm_groups._prefill_mojo()
+    ext = qmm_groups._prefill_mojo(torch.cuda.current_device())
     names = list(qmm_groups.PREFILL_TILES)
     gen = torch.Generator(device="cuda").manual_seed(1)
     head = f"{'shape':<18} {'N':>6} {'K':>6} {'M':>5} {'triton':>14}" + "".join(f" {'mojo ' + t:>22}" for t in tiles)
@@ -87,7 +87,7 @@ def bench_gemm(rows: list[int], tiles: list[str]) -> None:
 
 
 def bench_gemm8(rows: list[int], tiles: list[str]) -> None:
-    ext = qmm_groups._prefill_mojo()
+    ext = qmm_groups._prefill_mojo(torch.cuda.current_device())
     names = list(qmm_groups.PREFILL8_TILES)           # launcher index: after the bf16 tiles
     gen = torch.Generator(device="cuda").manual_seed(1)
     print(f"{'shape':<18} {'N':>6} {'K':>6} {'M':>5} {'triton':>14}" + "".join(f" {'mojo ' + t:>22}" for t in tiles))

@@ -73,3 +73,26 @@ def test_mojo_prompt_gemm_gives_tritons_bits_at_27b_chunks(monkeypatch, n, k, f3
         for tile in TILES:
             ref, got = _both(monkeypatch, x, g, n, f32, tile)
             assert torch.equal(ref, got), (rows, n, k, tile)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_mojo_prompt_gemm_gives_tritons_bits_on_each_gpu(monkeypatch):
+    """One process, two GPUs: each loads its own module, and a launch from the other GPU's context stays on its
+    tensors' GPU."""
+
+    n, k = 1000, 1024
+    for dev in (0, 1, 0):
+        with torch.cuda.device(dev):
+            g, gen = _weight(n, k, n + k)
+            x = torch.randn(333, k, generator=gen, device="cuda").bfloat16()
+            ref, got = _both(monkeypatch, x, g, n, False)
+            assert torch.equal(ref, got), dev
+    with torch.cuda.device(1):
+        g, gen = _weight(n, k, n + k)
+        x = torch.randn(333, k, generator=gen, device="cuda").bfloat16()
+        ref = _both(monkeypatch, x, g, n, False)[1]
+        w = qmm_groups.dequantize(*g, n)            # Triton launches on the current GPU: only the Mojo call crosses
+    with torch.cuda.device(0):
+        got = torch.empty_like(ref)
+        qmm_groups._prefill_mojo(x.get_device()).gemm(x, w, got, TILES.index("128x128"))
+    assert torch.equal(ref, got)
