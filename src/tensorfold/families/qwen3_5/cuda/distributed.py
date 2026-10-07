@@ -227,6 +227,12 @@ def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
         if sk is not None:
             raise ValueError("tiled row partials use the shape's own split")
         return matmul_partial(x, q, xs)
+    if q.layout == "groups":                       # ROCm's packed layout: the same lane kernel, fp32 out
+        from tensorfold.cuda.kernels import qmm_groups as groups
+
+        if sk is not None:
+            raise ValueError("groups row partials use the shape's own split")
+        return groups.matmul(x.contiguous(), q.weight, q.scales, q.biases, q.n, xs, f32=True)
     if x.ndim != 2 or x.dtype != torch.bfloat16 or x.shape[1] != q.k or q.k % 64:
         raise ValueError("row_partial expects (rows, shard K) bf16 and group-aligned weights")
     if q.weight.dtype != torch.int32 or q.scales.shape != (q.n, q.k // 64) or q.biases.shape != q.scales.shape:

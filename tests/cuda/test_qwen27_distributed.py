@@ -155,6 +155,38 @@ def test_cuda_partial_is_row_invariant_and_accurate(n, k):
     assert (full - ref).abs().max().item() <= ref.abs().max().item() * 2**-7
 
 
+@pytest.mark.parametrize("n,k", [(128, 256), (5120, 6144), (5120, 17408)])
+def test_rocm_groups_partial_is_accurate(n, k):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    pytest.importorskip("triton")
+    from tensorfold.cuda.build import hip
+
+    if not hip():
+        pytest.skip("the groups layout is ROCm's")
+    from tensorfold.cuda.kernels import qmm_groups
+    from tensorfold.families.qwen3_5.cuda.qmm_fast import tile
+
+    q = _qlinear(n, k, seed=n + k, device="cuda")
+    x = torch.randn((128, k), device="cuda").to(torch.bfloat16)
+    stored = [split_input(q, rank) for rank in (0, 1)]
+    packed = [tile(s) for s in stored]
+    assert all(p.layout == "groups" for p in packed)
+    xs = [local_input(x, rank) for rank in (0, 1)]
+    ref = x.float() @ _dequantize(q).T
+    for rows in (1, 7, 12, 16, 64, 128):
+        parts = [row_partial(xs[r][:rows], packed[r]) for r in (0, 1)]
+        assert all(p.dtype == torch.float32 and p.shape == (rows, n) for p in parts)
+        # the glue's group sums give the bits the kernel's own do
+        sums = [qmm_groups.group_sums(xs[r][:rows].contiguous()) for r in (0, 1)]
+        assert all(torch.equal(row_partial(xs[r][:rows], packed[r], xs=sums[r]), parts[r]) for r in (0, 1))
+        full = sum_rank_partials(parts).float()
+        tol = ref[:rows].abs().max().item() * 2**-7
+        assert (full - ref[:rows]).abs().max().item() <= tol
+        plain = sum_rank_partials([row_partial(xs[r][:rows], stored[r]) for r in (0, 1)]).float()
+        assert (full - plain).abs().max().item() <= tol
+
+
 def _nccl_worker(rank: int, port: int):
     import torch.distributed as dist
 

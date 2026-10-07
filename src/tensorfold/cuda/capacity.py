@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import os
 from pathlib import Path
 import re
 import struct
@@ -178,7 +179,8 @@ def available_bytes(torch) -> int:
     free, total = map(int, torch.cuda.mem_get_info())
     available = max(0, free - max(4 * GIB, math.ceil(total / 10)))
     host = host_room()
-    if host is None:
+    # TF_NO_HOST_BOUND=1: a discrete GPU's budget is its own (checkpoint reads go O_DIRECT through 64 MiB pieces)
+    if host is None or (os.environ.get("TF_NO_HOST_BOUND") == "1" and not unified(torch)):
         return available
     # one pool on a unified GPU: reclaimable page cache is available; a discrete GPU is bounded by both
     return host if unified(torch) else min(available, host)

@@ -81,7 +81,8 @@ class Qwen27Engine:
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
         self.vision = None
         self.vision_enabled = bool(vision)
-        torch.cuda.set_device(0)
+        # one machine with both GPUs visible: each rank names its own (RCCL then links the two peer to peer)
+        torch.cuda.set_device(int(os.environ.get("TF_CUDA_DEVICE", "0")))
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         if tp == 2:
@@ -112,6 +113,12 @@ class Qwen27Engine:
                     (lambda text: gdn_geometry(text, tp, max_rows, kv8=kv_fp8, one_kv=one_kv)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir)
+        if tp == 2 and hip():                      # a rank keeps half of every layer and of the head; the embedding whole
+            whole = tensor_bytes
+
+            def tensor_bytes(name, info, whole=whole):
+                size, host = whole(name, info)
+                return (size if "embed_tokens" in name else size // 2), host
         if exl3:
             geometry, tensor_bytes = admission(geometry)
         elif nvfp4:
@@ -130,7 +137,15 @@ class Qwen27Engine:
                                                                               kept=KEEP + 1 if many else 0),
                                    startup_copies=int(tp == 2))
         self.context_window = self.capacity_plan["context_window"]
-        if tp == 2:
+        if tp == 2 and hip():                      # ROCm: shard the stored words, then pack and fuse as one GPU does
+            from .qmm_fast import prepare, tile
+
+            full = load(model_dir)
+            self.w = split_weights(full, rank, split_head=split_head)
+            prepare(self.w, fuse=True)
+            # the drafter's head rows come from here: packed once, not per call
+            full.head = tile(full.head) if split_head else self.w.head
+        elif tp == 2:
             full = load(model_dir)
             self.w = split_weights(full, rank, tiled=True, split_head=split_head)
         elif hip():                                # ROCm: [gate|up], [z|b|a] and [k|v] fused, members as views
