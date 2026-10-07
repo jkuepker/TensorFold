@@ -8,6 +8,14 @@ const HostBuffer = @import("memory.zig").HostBuffer;
 const Module = @import("module.zig").Module;
 const launch = @import("launch.zig");
 const codeobject = @import("hip_probe");
+const Image = @import("code_object.zig").Image;
+
+/// Every embedded probe object, tagged with the architecture it was built for.
+const images = blk: {
+    var out: [codeobject.archs.len]Image = undefined;
+    for (&out, codeobject.archs, codeobject.objects) |*image, arch, bytes| image.* = .{ .arch = arch, .bytes = bytes };
+    break :blk out;
+};
 
 test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     var r = try Runtime.open();
@@ -42,7 +50,6 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     try std.testing.expectError(error.Invalid, b.upload(b.len, &.{1}));
     var arch_buffer: [256]u8 = undefined;
     const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
-    const images = [_]@import("code_object.zig").Image{.{ .arch = codeobject.arch, .bytes = &codeobject.bytes }};
     try std.testing.expectError(error.UnsupportedArchitecture, Module.loadForArchitecture(&r, &images, "gfx9999"));
     var m = try Module.loadForArchitecture(&r, &images, arch);
     defer m.unload();
@@ -69,4 +76,25 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     try stream.synchronize();
     try b.download(0, std.mem.asBytes(&got));
     for (got, 0..) |v, i| try std.testing.expectEqual(@as(u32, @intCast(i + 20)), v);
+}
+
+test "only the device's exact code object loads and a build without it fails closed" {
+    var r = try Runtime.open();
+    defer r.close();
+    var ctx = try Context.init(&r, 0);
+    defer ctx.deinit();
+    var arch_buffer: [256]u8 = undefined;
+    const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
+    var others: [images.len]Image = undefined;
+    var n: usize = 0;
+    for (images) |image| {
+        if (std.mem.eql(u8, image.arch, arch)) continue;
+        others[n] = image;
+        n += 1;
+    }
+    // The device's own object must be embedded; -Dhip-arch without it is a failed qualification, not a skip.
+    if (n != images.len - 1) return error.DeviceArchitectureNotEmbedded;
+    try std.testing.expectError(error.UnsupportedArchitecture, Module.loadForArchitecture(&r, others[0..n], arch));
+    // HIP itself refuses another generation's object, so exact selection is the only route to a launch.
+    for (others[0..n]) |image| try std.testing.expectError(error.HipFailed, Module.load(&r, image.bytes));
 }

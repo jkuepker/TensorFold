@@ -2,6 +2,14 @@ const std = @import("std");
 const data = @import("affine_data");
 const affine = @import("affine.zig");
 const Buffer = @import("memory.zig").DeviceBuffer;
+const Image = @import("code_object.zig").Image;
+
+/// Every embedded affine object, tagged with the architecture it was built for.
+const images = blk: {
+    var out: [data.archs.len]Image = undefined;
+    for (&out, data.archs, data.objects) |*image, arch, bytes| image.* = .{ .arch = arch, .bytes = bytes };
+    break :blk out;
+};
 
 test "row outputs are repeatable and independent of batch width" {
     try checkMatrix(false);
@@ -30,7 +38,6 @@ fn checkMatrix(comptime accuracy_only: bool) !void {
     defer stream.deinit();
     var arch_buffer: [256]u8 = undefined;
     const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
-    const images = [_]@import("code_object.zig").Image{.{ .arch = data.arch, .bytes = &data.image }};
     var module = try @import("module.zig").Module.loadForArchitecture(&r, &images, arch);
     defer module.unload();
     const function = try module.function("affine_row4_f32");
@@ -177,7 +184,6 @@ test "row Sum.f32 cancellation retains small terms across row counts" {
     defer stream.deinit();
     var arch_buffer: [256]u8 = undefined;
     const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
-    const images = [_]@import("code_object.zig").Image{.{ .arch = data.arch, .bytes = &data.image }};
     var module = try @import("module.zig").Module.loadForArchitecture(&r, &images, arch);
     defer module.unload();
     for ([_]usize{ 1, 2, 4, 8, 16, 32 }) |rows| {
@@ -224,7 +230,6 @@ test "row 4-bit fixed references including arithmetic-sensitive cancellation" {
             defer stream.deinit();
             var arch_buffer: [256]u8 = undefined;
             const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
-            const images = [_]@import("code_object.zig").Image{.{ .arch = data.arch, .bytes = &data.image }};
             var module = try @import("module.zig").Module.loadForArchitecture(&r, &images, arch);
             defer module.unload();
             var shape: affine.Shape = .{ .rows = @intCast(std.mem.readInt(u64, bytes[0..8], .little)), .outputs = @intCast(std.mem.readInt(u64, bytes[8..16], .little)), .inputs = @intCast(std.mem.readInt(u64, bytes[16..24], .little)), .bits = 4, .group = @intCast(std.mem.readInt(u64, bytes[32..40], .little)) };

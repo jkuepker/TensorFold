@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
+const hip_build = @import("zig/build/hip.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -159,16 +160,8 @@ pub fn build(b: *std.Build) void {
     const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
     const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
         b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
-    const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
-    if (!std.mem.eql(u8, hip_arch, "gfx1150") and !std.mem.eql(u8, hip_arch, "gfx1151") and !std.mem.eql(u8, hip_arch, "gfx1201"))
-        @panic("unsupported HIP probe architecture");
-    const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
-    hip_compile.addFileArg(b.path("zig/kernels/hip/runtime_tests.hip"));
-    hip_compile.addArg("-o");
-    const hip_object = hip_compile.addOutputFileArg("hip-runtime-probe.hsaco");
-    const hip_files = b.addWriteFiles();
-    _ = hip_files.addCopyFile(hip_object, "probe.hsaco");
-    const hip_probe = b.createModule(.{ .root_source_file = hip_files.add("probe.zig", b.fmt("pub const arch = \"{s}\";\npub const bytes align(8) = @embedFile(\"probe.hsaco\").*;\n", .{hip_arch})) });
+    const hip_arch = b.option([]const u8, "hip-arch", "Code objects to embed, comma separated (gfx1150,gfx1151,gfx1201)") orelse "gfx1150,gfx1151,gfx1201";
+    const hip_probe = hip_build.probe(b, hipcc, hip_arch);
     const hip_gpu_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/runtime_tests.zig"), .target = target, .link_libc = true });
     hip_gpu_module.addIncludePath(.{ .cwd_relative = hip_include });
     hip_gpu_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
@@ -176,16 +169,11 @@ pub fn build(b: *std.Build) void {
     const hip_gpu_test = b.addTest(.{ .root_module = hip_gpu_module });
     b.step("hip-gpu-build", "Compile HIP runtime tests without running GPU work").dependOn(&hip_gpu_test.step);
     b.step("hip-gpu-test", "Real HIP copies, fills and architecture-selected module launches").dependOn(&b.addRunArtifact(hip_gpu_test).step);
-    const affine_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
-    affine_compile.addFileArg(b.path("zig/kernels/hip/affine.hip"));
-    affine_compile.addArg("-o");
-    const affine_image = affine_compile.addOutputFileArg("affine.hsaco");
-    const affine_files = b.addWriteFiles();
-    _ = affine_files.addCopyFile(affine_image, "affine.hsaco");
-    _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_g64.hex"), "golden.hex");
-    _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_sensitive.hex"), "sensitive.hex");
-    _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_matrix.hex"), "matrix.hex");
-    const affine_data = b.createModule(.{ .root_source_file = affine_files.add("data.zig", b.fmt("pub const arch = \"{s}\";\npub const image align(8) = @embedFile(\"affine.hsaco\").*;\npub const hex = @embedFile(\"golden.hex\");\npub const sensitive = @embedFile(\"sensitive.hex\");\npub const matrix = @embedFile(\"matrix.hex\");\n", .{hip_arch})) });
+    const affine_objects = hip_build.objects(b, hipcc, hip_arch, "zig/kernels/hip/affine.hip", "affine");
+    _ = affine_objects.files.addCopyFile(b.path("zig/tests/hip_affine_g64.hex"), "golden.hex");
+    _ = affine_objects.files.addCopyFile(b.path("zig/tests/hip_affine_sensitive.hex"), "sensitive.hex");
+    _ = affine_objects.files.addCopyFile(b.path("zig/tests/hip_affine_matrix.hex"), "matrix.hex");
+    const affine_data = b.createModule(.{ .root_source_file = affine_objects.files.add("data.zig", b.fmt("{s}pub const hex = @embedFile(\"golden.hex\");\npub const sensitive = @embedFile(\"sensitive.hex\");\npub const matrix = @embedFile(\"matrix.hex\");\n", .{affine_objects.src})) });
     const affine_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/affine_gpu_test.zig"), .target = target, .link_libc = true });
     affine_module.addIncludePath(.{ .cwd_relative = hip_include });
     affine_module.addImport("affine_data", affine_data);
