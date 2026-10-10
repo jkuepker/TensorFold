@@ -273,16 +273,72 @@ pub const LaneHost = struct {
         h.mutex.unlock(h.io);
     }
 
-    /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
-    fn admitOne(h: *LaneHost) bool {
+    /// Every queued request the lanes have room for: a lone one to the backend's driver, the rest prefilled together.
+    fn admitAll(h: *LaneHost) void {
+        var batch: std.ArrayList(*Job) = .empty;
+        defer batch.deinit(h.gpa);
+        while (true) {
+            const job = switch (h.prepare()) {
+                .none => break,
+                .dropped => continue,
+                .job => |j| j,
+            };
+            if (job.request.max_tokens == 0 and h.info_.warm_turns) {
+                _ = h.warmPass(job, job.began);
+                continue;
+            }
+            if (batch.items.len == 0 and lone.fits(h, job)) {
+                _ = lone.run(h, job, job.began);
+                continue;
+            }
+            if (h.core.fills()) {
+                h.filling.append(h.gpa, job) catch {
+                    _ = h.drop(job, "out of memory");
+                };
+                continue;
+            }
+            batch.append(h.gpa, job) catch {
+                _ = h.drop(job, "out of memory");
+                continue;
+            };
+        }
+        if (batch.items.len == 0) return;
+        const streams = h.gpa.alloc(*lanes.Stream, batch.items.len) catch return h.dropAll(batch.items, "out of memory");
+        defer h.gpa.free(streams);
+        const errs = h.gpa.alloc(?anyerror, batch.items.len) catch return h.dropAll(batch.items, "out of memory");
+        defer h.gpa.free(errs);
+        for (streams, batch.items) |*s, job| s.* = &job.stream;
+        h.core.addStreams(streams, errs) catch |e| return h.dropAll(batch.items, h.words(e));
+        for (batch.items, errs) |job, err| {
+            if (err) |e| {
+                _ = switch (e) {
+                    error.Cancelled => h.cancel(job),
+                    error.LaneMemory => h.requeue(job),
+                    else => h.drop(job, h.words(e)),
+                };
+                continue;
+            }
+            h.prefilled(job, job.began);
+            if (h.deliver(job)) h.remove(job);
+        }
+    }
+
+    fn dropAll(h: *LaneHost, jobs: []const *Job, message: []const u8) void {
+        for (jobs) |job| _ = h.drop(job, message);
+    }
+
+    const Prepared = union(enum) { none, dropped, job: *Job };
+
+    /// The oldest queued request admitted with its stream made, when the lanes have room.
+    fn prepare(h: *LaneHost) Prepared {
         h.lock();
         if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
-            return false;
+            return .none;
         }
         const at = admit.pick(h) orelse { // a shared cache pool's head waits for room
             h.unlock();
-            return false;
+            return .none;
         };
         const job = h.queued.orderedRemove(at);
         job.seq = h.admissions;
@@ -290,7 +346,7 @@ pub const LaneHost = struct {
         h.admitted.append(h.gpa, job) catch {
             h.unlock();
             h.finish(job, .failed, "out of memory");
-            return true;
+            return .dropped;
         };
         h.unlock();
         const r = job.request;
@@ -302,7 +358,10 @@ pub const LaneHost = struct {
             job.marks = l.marks;
             reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
         } else |_| {};
-        job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch return h.drop(job, "the drafter could not start");
+        job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch {
+            _ = h.drop(job, "the drafter could not start");
+            return .dropped;
+        };
         job.stream = lanes.Stream.init(h.gpa, .{
             .id = "request",
             .prompt = r.prompt,
@@ -326,32 +385,20 @@ pub const LaneHost = struct {
             .reuse = reuse,
             .grammar = if (r.structure) |st| h.constraint(st) catch |e| {
                 job.proposer.deinit();
-                return h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
+                _ = h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
+                return .dropped;
             } else null,
             .decode_spans = h.spans(r),
             .decide = r.decide,
             .untaught = r.untaught,
         }) catch {
             job.proposer.deinit();
-            return h.drop(job, "out of memory");
+            _ = h.drop(job, "out of memory");
+            return .dropped;
         };
         job.started = true;
-        const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
-        job.began = began;
-        if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
-        if (lone.fits(h, job)) return lone.run(h, job, began);
-        if (h.core.fills()) {
-            h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
-            return true;
-        }
-        h.core.addStream(&job.stream) catch |e| return switch (e) {
-            error.Cancelled => h.cancel(job),
-            error.LaneMemory => h.requeue(job),
-            else => h.drop(job, h.words(e)),
-        };
-        h.prefilled(job, began);
-        if (h.deliver(job)) h.remove(job);
-        return true;
+        job.began = std.Io.Clock.awake.now(h.io).toNanoseconds();
+        return .{ .job = job };
     }
 
     /// The next filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
@@ -481,7 +528,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
-            while (h.admitOne()) {}
+            h.admitAll();
             h.fillOne();
             status.noteLive(h);
             h.lock();
