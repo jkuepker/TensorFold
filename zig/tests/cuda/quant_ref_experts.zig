@@ -1,4 +1,4 @@
-//! Grouped FP8 and NVFP4 experts against float64 references: a routed plan, SwiGLU gate-up, down to fp32 pair rows.
+//! Grouped FP8, NVFP4 and MLX affine-4 experts against float64 references: a routed plan, SwiGLU gate-up, down to fp32 pair rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -48,10 +48,14 @@ fn plan(r: *Rig, router: grouped.Router, dpicks: u64, pairs: usize, tile: usize)
     return .{ .p = p, .items = grouped.maxItems(pairs, E, tile) };
 }
 
-/// SwiGLU as the kernels round it: gate and up to bf16, silu to bf16, the product to bf16 (no clamp).
-fn swiglu(g: f64, u: f64) f64 {
-    const gv = h.bfOf(h.bf16Of(@floatCast(g)));
-    const uv = h.bfOf(h.bf16Of(@floatCast(u)));
+/// SwiGLU as the kernels round it: gate and up to bf16, the clamp (`limit` > 0), silu to bf16, the product to bf16.
+fn swiglu(g: f64, u: f64, limit: f64) f64 {
+    var gv = h.bfOf(h.bf16Of(@floatCast(g)));
+    var uv = h.bfOf(h.bf16Of(@floatCast(u)));
+    if (limit > 0) {
+        gv = @min(gv, limit);
+        uv = @min(@max(uv, -limit), limit);
+    }
     const s = h.bfOf(h.bf16Of(@floatCast(gv / (1 + @exp(-gv)))));
     return s * uv;
 }
@@ -89,7 +93,7 @@ fn batch(r: *Rig, comptime label: []const u8, g: experts.Grouped, router: groupe
                 us += xv * up.value(up.ctx, e, j, i);
                 abs += @abs(xv * gate.value(gate.ctx, e, j, i)) + @abs(xv * up.value(up.ctx, e, j, i));
             }
-            const a = swiglu(gs, us);
+            const a = swiglu(gs, us, l.limit);
             want[p * NI + j] = a;
             // a bf16 step either side of each of the three roundings, and fp32 sums
             tol[p * NI + j] = @abs(a) * std.math.pow(f64, 2, -6) + abs * std.math.pow(f64, 2, -12) + 1e-30;
@@ -97,7 +101,7 @@ fn batch(r: *Rig, comptime label: []const u8, g: experts.Grouped, router: groupe
     }
     var name: [96]u8 = undefined;
     const path = if (prompt) "prompt" else "decode";
-    try r.close(try std.fmt.bufPrint(&name, label ++ " experts {s} gate-up, {d} rows x {d} slots", .{ path, rows, slots }), act, false, want, tol);
+    try r.close(try std.fmt.bufPrint(&name, label ++ " experts {s} gate-up, {d} rows x {d} slots, limit {d}", .{ path, rows, slots, l.limit }), act, false, want, tol);
     // down from the kernel's own activations: fp32 (decode) or bf16 sums (prompt)
     const got_act = try r.back(act, pairs * NI * 2);
     const dwant = try r.a.alloc(f64, pairs * D);
@@ -150,6 +154,65 @@ fn fp4Mat(r: *Rig, n: usize, k: usize) !Fp4M {
     const global = try r.a.alloc(f32, E);
     for (global) |*v| v.* = 0.005 + r.rng.float(f32) * 0.01;
     return .{ .codes = codes, .scales = scales, .global = global, .n = n, .k = k };
+}
+
+/// MLX affine-4 words (n, k/8) with bf16 scales and biases (n, k/64), per expert; `rounded` is the prompt kernel's bf16 weight.
+const A4M = struct { words: []const u32, scales: []const u16, biases: []const u16, n: usize, k: usize, rounded: bool };
+fn a4Val(c: A4M, e: usize, row: usize, col: usize) f64 {
+    const q: f64 = @floatFromInt((c.words[(e * c.n + row) * (c.k / 8) + col / 8] >> @intCast(4 * (col % 8))) & 0xF);
+    const g = (e * c.n + row) * (c.k / 64) + col / 64;
+    const w: f32 = @floatCast(q * h.bfOf(c.scales[g]) + h.bfOf(c.biases[g]));
+    return if (c.rounded) h.bfOf(h.bf16Of(w)) else w;
+}
+
+fn a4Mat(r: *Rig, n: usize, k: usize) !A4M {
+    const words = try r.a.alloc(u32, E * n * k / 8);
+    r.rng.bytes(std.mem.sliceAsBytes(words));
+    const scales = try r.a.alloc(u16, E * n * k / 64);
+    const biases = try r.a.alloc(u16, scales.len);
+    for (scales, biases) |*sc, *bi| {
+        const s = 0.004 + r.rng.float(f32) * 0.02;
+        sc.* = h.bf16Of(s);
+        bi.* = h.bf16Of(-s * (4 + r.rng.float(f32) * 8));
+    }
+    return .{ .words = words, .scales = scales, .biases = biases, .n = n, .k = k, .rounded = false };
+}
+
+fn a4Dev(r: *Rig, m: A4M) !experts.Affine4Experts.Mats {
+    return .{ .words = try r.dev(std.mem.sliceAsBytes(m.words)), .scales = try r.dev(std.mem.sliceAsBytes(m.scales)), .biases = try r.dev(std.mem.sliceAsBytes(m.biases)) };
+}
+
+/// MLX affine-4 with SwiGLU gate and up, packed on the device as experts.make stacks them; decode, prompt and a clamped layer.
+fn affine4(r: *Rig, router: grouped.Router, x: []const u16) !void {
+    var kmods: [3]cuda.Module = undefined;
+    for ([_][]const u8{ cuda.kernels.experts, cuda.kernels.experts_prefill, cuda.kernels.experts_pack }, &kmods) |blob, *m| m.* = try cuda.Module.load(r.gpu.d, blob);
+    defer for (&kmods) |*m| m.unload();
+    const sms: usize = @intCast(try r.gpu.ctx.attribute(.multiprocessor_count));
+    const ex = try experts.Affine4Experts.resolve(kmods[0], kmods[1], kmods[2], sms);
+    const gm = try a4Mat(r, NI, D);
+    const um = try a4Mat(r, NI, D);
+    const dm = try a4Mat(r, D, NI);
+    const A = experts.Affine4Experts;
+    const scratch = try r.zeros(A.bytes(E, NI, D));
+    const up = try r.zeros(2 * A.bytes(E, NI, D));
+    const down = try r.zeros(A.bytes(E, D, NI));
+    try ex.packGateUp(r.gpu.d, r.s, try a4Dev(r, gm), try a4Dev(r, um), scratch, up, E, NI, D);
+    const dd = try a4Dev(r, dm);
+    try ex.pack(r.s, dd.words, dd.scales, dd.biases, down, E, D, NI);
+    var l: experts.Layer = .{ .format = .affine4, .swiglu = true, .up = up, .down = down, .width = NI, .dims = D, .experts = E };
+    const g: experts.Grouped = .{ .affine4 = &ex };
+    const M = Matrix(A4M);
+    var gp = gm;
+    var upm = um;
+    var dp = dm;
+    gp.rounded = true;
+    upm.rounded = true;
+    dp.rounded = true;
+    for ([_]f32{ 0, 0.4 }) |limit| {
+        l.limit = limit;
+        for ([_]usize{ 1, 3, 40 }) |rows| _ = try batch(r, "affine4", g, router, l, x, rows, false, M{ .ctx = gm, .value = a4Val }, M{ .ctx = um, .value = a4Val }, M{ .ctx = dm, .value = a4Val });
+        _ = try batch(r, "affine4", g, router, l, x, 300, true, M{ .ctx = gp, .value = a4Val }, M{ .ctx = upm, .value = a4Val }, M{ .ctx = dp, .value = a4Val });
+    }
 }
 
 pub fn run(r: *Rig) !void {
@@ -208,5 +271,6 @@ pub fn run(r: *Rig) !void {
         for ([_]usize{ 1, 3, 40 }) |rows| _ = try batch(r, "nvfp4", g, router, l, x, rows, false, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
         _ = try batch(r, "nvfp4", g, router, l, x, 300, true, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
     }
-    check.pass("experts fp8g and nvfp4 (decode, prompt): gate-up and down within float64 tolerance", .{});
+    try affine4(r, router, x);
+    check.pass("experts fp8g, nvfp4 and affine4 SwiGLU (decode, prompt): gate-up and down within float64 tolerance", .{});
 }
