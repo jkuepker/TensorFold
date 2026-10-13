@@ -150,29 +150,42 @@ extern "C" __global__ void __launch_bounds__(32) tf_qwen_topk(const float* __res
 
 namespace {
 
-template <typename T> __device__ __forceinline__ float load_y(const T* p);
-template <> __device__ __forceinline__ float load_y<float>(const float* p) { return *p; }
-template <> __device__ __forceinline__ float load_y<__nv_bfloat16>(const __nv_bfloat16* p) { return __bfloat162float(*p); }
+template <typename T> __device__ __forceinline__ void load4(const T* p, float (&v)[4]);
+template <> __device__ __forceinline__ void load4<float>(const float* p, float (&v)[4]) {
+    const float4 q = *reinterpret_cast<const float4*>(p);
+    v[0] = q.x, v[1] = q.y, v[2] = q.z, v[3] = q.w;
+}
+template <> __device__ __forceinline__ void load4<__nv_bfloat16>(const __nv_bfloat16* p, float (&v)[4]) {
+    const uint2 q = *reinterpret_cast<const uint2*>(p);
+    v[0] = __uint_as_float(q.x << 16), v[1] = __uint_as_float(q.x & 0xFFFF0000u);
+    v[2] = __uint_as_float(q.y << 16), v[3] = __uint_as_float(q.y & 0xFFFF0000u);
+}
 
-// Block (row, 512 columns): the slots summed in slot order as fp32 w * y fused multiply-adds, rounded once to bf16.
+// Block (row, 512 columns), four a thread: the slots summed in slot order as fp32 w * y fused multiply-adds, rounded once to bf16.
 template <typename T>
 __device__ __forceinline__ void combine(const T* __restrict__ Y, const float* __restrict__ W, __nv_bfloat16* __restrict__ OUT, int S, int D) {
     const int64_t r = blockIdx.x;
-    const int d = blockIdx.y * 512 + threadIdx.x * 2;
-    for (int j = 0; j < 2; ++j) {
-        if (d + j >= D) return;
-        float acc = 0.0f;
-        for (int k = 0; k < S; ++k) acc = __fmaf_rn(W[r * S + k], load_y<T>(Y + (r * S + k) * D + d + j), acc);
-        OUT[r * D + d + j] = __float2bfloat16_rn(acc);
+    const int d = blockIdx.y * 512 + threadIdx.x * 4;
+    if (d >= D) return;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int k = 0; k < S; ++k) {
+        float y[4];
+        load4<T>(Y + (r * S + k) * D + d, y);
+        const float w = W[r * S + k];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc[j] = __fmaf_rn(w, y[j], acc[j]);
     }
+    __nv_bfloat162* o = reinterpret_cast<__nv_bfloat162*>(OUT + r * D + d);
+    o[0] = __floats2bfloat162_rn(acc[0], acc[1]);
+    o[1] = __floats2bfloat162_rn(acc[2], acc[3]);
 }
 
 }  // namespace
 
-extern "C" __global__ void __launch_bounds__(256) tf_qwen_combine_f32(const float* Y, const float* W, __nv_bfloat16* OUT, int S, int D) {
+extern "C" __global__ void __launch_bounds__(128) tf_qwen_combine_f32(const float* Y, const float* W, __nv_bfloat16* OUT, int S, int D) {
     combine<float>(Y, W, OUT, S, D);
 }
 
-extern "C" __global__ void __launch_bounds__(256) tf_qwen_combine_bf16(const __nv_bfloat16* Y, const float* W, __nv_bfloat16* OUT, int S, int D) {
+extern "C" __global__ void __launch_bounds__(128) tf_qwen_combine_bf16(const __nv_bfloat16* Y, const float* W, __nv_bfloat16* OUT, int S, int D) {
     combine<__nv_bfloat16>(Y, W, OUT, S, D);
 }

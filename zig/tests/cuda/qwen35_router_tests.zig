@@ -161,6 +161,9 @@ fn bf16(v: f32) u16 {
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
+// Rows of the first sweep rounds: an engine prompt chunk and the 4096-row chunk limit.
+const big_rows = [_]usize{ 1509, 4096 };
+
 // Native against the replay on random inputs the Python run did not draw: scales, ties and row counts across every tile.
 fn sweep(r: *Rig, rounds: usize) !void {
     const gpa = r.gpu.gpa;
@@ -171,7 +174,7 @@ fn sweep(r: *Rig, rounds: usize) !void {
     const w = try gpa.alloc(u16, ne * r.sh.d);
     defer gpa.free(w);
     for (0..rounds) |round| {
-        const m = if (round % 5 == 0) 16 * (1 + rng.uintLessThan(usize, 40)) else 1 + rng.uintLessThan(usize, 600);
+        const m = if (round < big_rows.len) big_rows[round] else if (round % 5 == 0) 16 * (1 + rng.uintLessThan(usize, 40)) else 1 + rng.uintLessThan(usize, 600);
         const scale = std.math.pow(f32, 4, @floatFromInt(rng.intRangeAtMost(i32, -3, 2)));
         for (w) |*v| v.* = bf16(rng.floatNorm(f32) * 0.03 * scale);
         const x = try gpa.alloc(u16, m * r.sh.d);

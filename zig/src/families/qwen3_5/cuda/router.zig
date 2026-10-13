@@ -127,12 +127,13 @@ pub const Native = struct {
     }
 
     pub fn combine(n: Native, y: u64, y_bf16: bool, wts: u64, out: u64, rows: usize, sh: Shape) !void {
+        if (sh.d % 4 != 0) return error.RouterShape;
         var a: cuda.Args = .{};
         a.add(y);
         a.add(wts);
         a.add(out);
         for ([_]usize{ sh.top_k + 1, sh.d }) |v| a.add(@as(c_int, @intCast(v)));
-        try n.go(if (y_bf16) n.combine_bf16 else n.combine_f32, .{ u(rows), cdiv(sh.d, 512) }, 256, 0, &a);
+        try n.go(if (y_bf16) n.combine_bf16 else n.combine_f32, .{ u(rows), cdiv(sh.d, 512) }, 128, 0, &a);
     }
 };
 
