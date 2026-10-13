@@ -8,9 +8,15 @@ no Mac engine: `tensorfold serve` on a Mac refuses it.
 
 ## Checkpoint
 
-There is no published MLX checkpoint yet. Convert openbmb's BF16 release (66 GB) with `tools/minicpmv47_to_mlx.py`,
-using the Python that has mlx-lm. This was tested on an Apple Silicon Mac with mlx-lm 0.31.3 (MLX 0.32.1), where the
-conversion takes about a minute; it has not been tried on Linux. Then copy the 20 GB result to the Spark:
+Download the converted checkpoint (20 GB, Apache-2.0 like the original) on the Spark:
+
+```bash
+hf download kuepker/MiniCPM-V-4.7-35B-A3B-MLX-4bit-TensorFold --local-dir ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit
+```
+
+Or convert openbmb's BF16 release (66 GB) yourself with `tools/minicpmv47_to_mlx.py`, using the Python that has
+mlx-lm. This was tested on an Apple Silicon Mac with mlx-lm 0.31.3 (MLX 0.32.1), where the conversion takes about a
+minute; it has not been tried on Linux. Then copy the result to the Spark:
 
 ```bash
 hf download openbmb/MiniCPM-V-4.7-35B-A3B --local-dir ~/models/minicpm-v47-bf16
