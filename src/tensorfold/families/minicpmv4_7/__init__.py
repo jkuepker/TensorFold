@@ -13,7 +13,10 @@ MODEL_TYPES = ("minicpmv4_7",)
 TITLE = "MiniCPM-V 4.7"
 # converted locally with tools/minicpmv47_to_mlx.py (MLX 4-bit in groups of 64, routers 8-bit, vision-bf16.safetensors)
 MODELS: tuple[str, ...] = ()
-MTP_REPO = "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP"       # Qwen3.6's MTP layer (mtp-4bit.safetensors)
+# Qwen3.6's tested repo, whose mtp-4bit.safetensors drafts MiniCPM (hub.cached also reads an older Vontra/ cache)
+from tensorfold.families.qwen3_5_moe import MODELS as _QWEN36  # noqa: E402
+
+MTP_REPO = _QWEN36[0]
 MTP_FILE = "mtp-4bit.safetensors"
 DRAFTER = ""                  # drafts with Qwen3.6's MTP layer
 CUDA_QUANTIZATION = (4, 64)   # the Qwen3.6 MoE CUDA kernels read MLX affine 4-bit weights in groups of 64

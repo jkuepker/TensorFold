@@ -55,7 +55,7 @@ serially; drafted replies equal those.
 
 ### Images
 
-`--vision` loads the tower and merger in BF16 (about 0.9 GB) next to the text model and reserves 1 GiB for a tower
+`--vision` loads the tower and merger in BF16 (about 1 GiB) next to the text model and reserves 1 GiB for a tower
 call's activations (`--vision-offload`: the tower stays in host RAM and visits the GPU per request, 2 GiB reserved).
 It runs in plain PyTorch, no transformers needed on the server. Requests send OpenAI `image_url` parts as in
 [images](../vision.md).
@@ -87,26 +87,24 @@ in for every request (2-7 s on GB10, whose GPU shares host memory anyway), so le
 
 ## Measurements
 
+TODO(josef): fill this section. Only the figures below were measured while porting; everything marked TODO was not.
+
 One DGX Spark (GB10), NVIDIA's `pytorch:26.07-py3` container, checkpoint converted as above, Qwen3.6's MTP side file,
 `--context 49152`, `localeval speed --thinking off --concurrency 2` (decode tok/s at about 0.1k, 1k, 4k and 16k-token
-prompts, 128 forced tokens, median of three; two streams aggregate):
+prompts, 128 forced tokens, median of three):
 
-| | 0.1k | 1k | 4k | 16k | 2 streams | prefill @16k |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| TensorFold, text-only view of the checkpoint, drafted | 154.8 | 153.2 | 147.6 | 142.1 | 119.6 | 6,599 tok/s |
-| TensorFold, `--vision`, drafted (two runs) | 162.5 / 162.2 | 162.6 / 168.7 | 150.6 / 144.5 | 123.0 / 139.7 | 113.5 / 123.7 | 6,452 / 6,474 tok/s |
-| TensorFold, `--no-drafts` | 92.1 | 89.7 | 87.5 | 79.6 | 80.9 | 7,033 tok/s |
-| vLLM 0.31.1rc1, NVFP4A16 attn+lm_head (TODO(josef): exact scheme) | 99.4 | 102.5 | 101.3 | 93.1 | 115.1 | |
-| vLLM 0.31.1rc1, NVFP4A16, DSpark k=4 | 117.4 | 118.2 | 115.3 | 62.6 | | |
+| | 0.1k | 1k | 4k | 16k | 2 streams aggregate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TensorFold, text-only view of the checkpoint | 155 | 153 | 148 | 142 | TODO |
+| TensorFold, `--vision` (localeval 20261013-012532) | 162.5 | 162.6 | 150.6 | 123.0 | 113.5 |
+| TensorFold, `--vision`, rerun (localeval 20261013-012613) | 162.2 | 168.7 | 144.5 | 139.7 | 123.7 |
+| TensorFold, `--no-drafts` | TODO | TODO | TODO | TODO | TODO |
+| vLLM, NVFP4 (TODO(josef): version, serve command) | 99 | 102 | 101 | 93 | TODO |
 
-`--vision` leaves text decoding as it was: the two runs scatter around the text-only one (localeval flagged 14-26%
-spread on the first). Long-context code (18 tasks, speed set): 176.6 / 166.9 / 141.5 tok/s at 4k / 16k / 32k, 161.7
-on average (vLLM NVFP4A16: 92.0). Quality, text-only, drafted: MMLU 83.6 (1,425 questions), GSM8K 48 (25), IFEval 88
-(25), HumanEval 97.5 (40); vLLM NVFP4A16 83.1 / 48 / 92 / 100.
+The `--vision` runs scatter around the text-only one; localeval flagged 14-26% decode spread on the first run.
+Prefill with `--vision` at 16k: 6,452 / 6,474 tok/s. Startup estimate: 26.8 GiB without `--vision`, 28.8 GiB with it.
 
-The startup estimate is 26.8 GiB without `--vision` and 28.8 GiB with it (tower and its 1 GiB workspace).
-
-TODO(josef): the vLLM serve commands, and any image-throughput numbers you want here.
+TODO(josef): quality numbers, image throughput, peak memory.
 
 ## Caveats
 
@@ -115,8 +113,9 @@ TODO(josef): the vLLM serve commands, and any image-throughput numbers you want 
   `mm_processor_kwargs` (vLLM's `max_slice_nums`, `downsample_mode`) are not read: the checkpoint's settings apply.
 - Image input decodes one stream at a time: `--vision` with `--parallel` above 1 is refused at startup. Text-only
   servers take `--parallel` as on Qwen3.6 MoE.
-- Several images in one request work (each with its own `<image_id>`, the canvas positions laid out per image), up
-  to `--vision-max-images`; they are encoded in runs of at most 16,384 patches.
+- Several images in one request: the token layout (each with its own `<image_id>`) and the canvas positions match
+  transformers on the CPU, but a multi-image request has not been checked end to end on a GPU yet, nor has a
+  request over 16,384 patches (encoded in several tower calls).
 - The image processor resizes with Pillow's bicubic filter; transformers' default torchvision path can differ by one
   8-bit level per pixel. Token ids, slice grids and positions match it exactly.
 - Tool calls use the same `<tool_call>` parser as Qwen3.6.
