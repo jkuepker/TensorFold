@@ -12,7 +12,7 @@ There is no published MLX checkpoint yet. Convert openbmb's BF16 release with `t
 Python that has mlx-lm (on a Mac, or anywhere mlx-lm installs):
 
 ```bash
-hf download openbmb/MiniCPM-V-4.7 --local-dir ~/models/minicpm-v47-bf16
+hf download openbmb/MiniCPM-V-4.7-35B-A3B --local-dir ~/models/minicpm-v47-bf16
 python tools/minicpmv47_to_mlx.py --src ~/models/minicpm-v47-bf16 --out ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit
 python tools/minicpmv47_mlx_check.py inventory --out ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit   # optional checks
 ```
@@ -87,24 +87,42 @@ in for every request (2-7 s on GB10, whose GPU shares host memory anyway), so le
 
 ## Measurements
 
-TODO(josef): fill this section. Only the figures below were measured while porting; everything marked TODO was not.
+One DGX Spark (GB10), next to a resident vLLM server holding about 58 GB, NVIDIA's `pytorch:26.07-py3` container,
+TensorFold 0.6.6 plus this family, checkpoint converted as above, Qwen3.6's MTP side file, `--context 49152`.
+Speed is `localeval speed --thinking off --concurrency 2`: decode tok/s at about 0.1k, 1k, 4k and 16k-token prompts,
+128 forced tokens, median of three. Drafted decode varies 10-25% run to run, so read the drafted rows as ranges.
 
-One DGX Spark (GB10), NVIDIA's `pytorch:26.07-py3` container, checkpoint converted as above, Qwen3.6's MTP side file,
-`--context 49152`, `localeval speed --thinking off --concurrency 2` (decode tok/s at about 0.1k, 1k, 4k and 16k-token
-prompts, 128 forced tokens, median of three):
+| | 0.1k | 1k | 4k | 16k | 2 streams aggregate | prefill @16k |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| TensorFold, drafts (text) | 154.8 | 153.2 | 147.6 | 142.1 | 119.6 | 6,599 |
+| TensorFold, drafts, `--vision` | 162.5 | 162.6 | 150.6 | 123.0 | 113.5 | 6,452 |
+| TensorFold, drafts, `--vision`, rerun | 162.2 | 168.7 | 144.5 | 139.7 | 123.7 | 6,474 |
+| TensorFold, `--no-drafts` | 92.1 | 89.7 | 87.5 | 79.6 | 80.9 | 7,033 |
+| vLLM 0.31.1rc1.dev296, NVFP4 W4A16 (attention + lm_head), Marlin | 99.4 | 102.5 | 101.3 | 93.1 | 115.1 | - |
+| same vLLM, OpenBMB's DSpark drafter, 4 drafts | 117.4 | 118.2 | 115.3 | 62.6 | 136.4 | - |
 
-| | 0.1k | 1k | 4k | 16k | 2 streams aggregate |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| TensorFold, text-only view of the checkpoint | 155 | 153 | 148 | 142 | TODO |
-| TensorFold, `--vision` (localeval 20261013-012532) | 162.5 | 162.6 | 150.6 | 123.0 | 113.5 |
-| TensorFold, `--vision`, rerun (localeval 20261013-012613) | 162.2 | 168.7 | 144.5 | 139.7 | 123.7 |
-| TensorFold, `--no-drafts` | TODO | TODO | TODO | TODO | TODO |
-| vLLM, NVFP4 (TODO(josef): version, serve command) | 99 | 102 | 101 | 93 | TODO |
+The vLLM rows use the checkpoint and serve command from the
+[NVFP4 recipe](https://github.com/jkuepker/minicpm-v47-nvfp4a16-dgx-spark) (`--gpu-memory-utilization 0.30`,
+fp8 KV cache). The gain over vLLM comes from the drafts: without them TensorFold decodes about 10% slower.
 
-The `--vision` runs scatter around the text-only one; localeval flagged 14-26% decode spread on the first run.
-Prefill with `--vision` at 16k: 6,452 / 6,474 tok/s. Startup estimate: 26.8 GiB without `--vision`, 28.8 GiB with it.
+Long-context code (localeval's `longctx-code` speed set: 18 tasks with 4k, 16k and 32k tokens of vLLM source as
+context and a 2,048-token answer, run with `--judge none`, so it counts completed tasks, not correct ones), drafts on,
+text: all 18 completed; decode 176.6 at 4k, 166.9 at 16k, 141.5 at 32k, 161.7 on average. vLLM NVFP4: 99.9, 92.3,
+83.9, 92.0 on average.
 
-TODO(josef): quality numbers, image throughput, peak memory.
+Quality (localeval, thinking off, greedy, 2,048 max tokens):
+
+| | MMLU (1,425) | GSM8K (25) | IFEval (25) | HumanEval (40) |
+| --- | ---: | ---: | ---: | ---: |
+| TensorFold, MLX 4-bit (this recipe) | 83.6 | 48 | 88 | 97.5 |
+| vLLM, NVFP4 W4A16 | 83.1 | 48 | 92 | 100 |
+| vLLM, BF16 | 84.1 | 44 | 92 | 100 |
+
+GSM8K and IFEval use 25 items, so one item is 4 points; HumanEval's 97.5 is one problem of 40. MMLU is the precise
+signal.
+
+Memory: startup estimate 26.8 GiB without `--vision` and 28.8 GiB with it at `--context 49152`; the process held about
+22.7 GiB after the drafted runs. On the same engine, Qwen3.6-35B-A3B fit its full native 262,144-token window for one stream next to the 58 GB vLLM server; MiniCPM's text side is the same size.
 
 ## Caveats
 
