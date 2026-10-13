@@ -166,6 +166,23 @@ def hook(dumps: Dumps) -> None:
     glue.add_rmsnorm, moe.router, moe.select_rows, moe.run = traced_norm, traced_router, traced_select, traced_run
 
 
+def specialization() -> dict:
+    """Each launched JIT function's parameter names and which ones Triton never specializes."""
+
+    import gc
+
+    from triton.runtime.jit import JITFunction
+
+    out = {}
+    for fn in gc.get_objects():
+        if isinstance(fn, JITFunction):
+            out[f"{fn.fn.__module__}.{fn.fn.__qualname__}"] = {
+                "params": [p.name for p in fn.params],
+                "do_not_specialize": [p.name for p in fn.params if p.do_not_specialize],
+                "no_align": [p.name for p in fn.params if p.do_not_specialize_on_alignment]}
+    return out
+
+
 def weight_lines(w) -> list[str]:
     """'name sha256 bytes' for the loaded weights: the names and bytes the Zig upload reports."""
 
@@ -264,6 +281,7 @@ def main() -> int:
     ap.add_argument("--compare", nargs=2, metavar="DIR")
     ap.add_argument("--weights-only", action="store_true", help="write weights.txt and stop")
     ap.add_argument("--context", type=int, default=8192)
+    ap.add_argument("--tools", default="", help="folder of triton_aot_manifest.py: record every Triton launch (launches.json, jit.json)")
     a = ap.parse_args()
     if a.compare:
         return compare(Path(a.compare[0]), Path(a.compare[1]))
@@ -272,6 +290,12 @@ def main() -> int:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     model = Path(a.model)
+    rec = None
+    if a.tools:
+        sys.path.insert(0, a.tools)
+        import triton_aot_manifest as aot
+
+        rec = aot.Recorder().install()
 
     import torch
     import tensorfold
@@ -323,6 +347,9 @@ def main() -> int:
               f"generate equal {tokens['generate_equal']}", flush=True)
 
     (out / "timing.json").write_text(json.dumps(timing, indent=1) + "\n")
+    if rec is not None:
+        rec.dump(out / "launches.json")
+        (out / "jit.json").write_text(json.dumps(specialization(), indent=1, sort_keys=True) + "\n")
     m = manifest(out)
     (out / "manifest.json").write_text(json.dumps(m, indent=1) + "\n")
     print(f"done: {len(m['files'])} files, tree {m['tree']}", flush=True)
