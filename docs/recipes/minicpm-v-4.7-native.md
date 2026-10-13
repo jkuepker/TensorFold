@@ -1,10 +1,10 @@
 # MiniCPM-V 4.7 35B-A3B on the native CUDA server
 
-`tensorfold-native serve` runs MiniCPM-V 4.7's language model on one NVIDIA GPU, text only. The `minicpmv4_7` family is a
-thin wrapper of the [Qwen3.6 MoE](qwen3.6-moe.md) engine: the language model is a fine-tune of Qwen3.6-35B-A3B, so Gated
-DeltaNet, gated attention, the 256 routed experts and the shared expert, the lane core with its prompt cache, and the MTP
-drafts are Qwen3.6's own code. This page lists what MiniCPM changes. It was built and measured on a DGX Spark (GB10,
-sm_121) on TensorFold 1.0.9.
+`tensorfold-native serve` runs MiniCPM-V 4.7's language model on one NVIDIA GPU, text only. The `minicpmv4_7` family is
+a thin wrapper of the [Qwen3.6 MoE](qwen3.6-moe.md) engine: the language model is a fine-tune of Qwen3.6-35B-A3B, so
+Gated DeltaNet, gated attention, the 256 routed experts and the shared expert, the lane core with its prompt cache, and
+the MTP drafts are Qwen3.6's own code. This page lists what MiniCPM changes. It was built and measured on a DGX Spark
+(GB10, sm_121) on TensorFold 1.0.9.
 
 Images are not served here. A request with an image part is refused (`this server accepts text parts only; image, audio
 and video inputs are unsupported`), and the image tower waits for upstream #598. The 0.6.6 Python engine serves images:
@@ -21,12 +21,12 @@ hf download kuepker/MiniCPM-V-4.7-35B-A3B-MLX-4bit-TensorFold --local-dir ~/mode
 What the engine reads from it:
 
 - `config.json` has the top-level `model_type: minicpmv4_7` and wraps the language model as `text_config` (`model_type`
-  `qwen3_5_moe_text`); a wrapper around anything else is refused. The geometry is Qwen3.6's, MLX 4-bit in groups of 64
-  with 8-bit routers and shared-expert gates.
+`qwen3_5_moe_text`); a wrapper around anything else is refused. The geometry is Qwen3.6's, MLX 4-bit in groups of 64
+with 8-bit routers and shared-expert gates.
 - The vocabulary has 248,144 ids where Qwen3.6's has 248,320. The embedding and head sizes come from the checkpoint's
-  config, and the head's stores stop at the vocabulary (it is not a multiple of the 128-row tile).
+config, and the head's stores stop at the vocabulary (it is not a multiple of the 128-row tile).
 - The `language_model.*` tensors are read. `model.vision_tower.*`, `model.merger.*` and `vision-bf16.safetensors` are left
-  unread, so they cost no memory.
+unread, so they cost no memory.
 
 ## Drafts
 
@@ -50,13 +50,13 @@ With drafts on and no file found the server refuses to start and says so; `--no-
 
 The native Qwen3.6 engine runs its norms, Gated DeltaNet, attention and router glue as Triton cubins captured from the
 Python 0.6.6 engine on the same chip, and `TENSORFOLD_CUDA_KERNELS` names the folder (without it the server refuses to
-load: `QwenNeedsCapturedKernels`). The set is produced once, on stock Qwen3.6, as
-`zig/tests/cuda/qwen36/README.md` describes: `capture.py` in the Python engine's container records every launch,
-`triton_aot_manifest.py` and `aot_pack.py` pack them, and `capture.py --mtp` and `--lanes N` add the drafted rounds'
-verify widths and the concurrent rounds' variants. MiniCPM uses that set unchanged.
+load: `QwenNeedsCapturedKernels`). The set is produced once, on stock Qwen3.6, as `zig/tests/cuda/qwen36/README.md`
+describes: `capture.py` in the Python engine's container records every launch, `triton_aot_manifest.py` and
+`aot_pack.py` pack them, and `capture.py --mtp` and `--lanes N` add the drafted rounds' verify widths and the concurrent
+rounds' variants. MiniCPM uses that set unchanged.
 
 - A set from the layer capture alone serves `--no-drafts --parallel 1`. With drafts or `--parallel 2` the server stops at
-  load on a launch with no captured variant (`MissingTritonVariant`).
+load on a launch with no captured variant (`MissingTritonVariant`).
 - TODO: own glue kernels, which would remove the capture step.
 
 ## Serve
@@ -66,11 +66,11 @@ export TENSORFOLD_CUDA_KERNELS=<captured kernel set>
 tensorfold-native serve ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit --name minicpm --parallel 2 --context 49152 --no-thinking
 ```
 
-Thinking is on by default in the chat template and `max_tokens` counts it; `--no-thinking` or
-`chat_template_kwargs: {"enable_thinking": false}` turns it off, and every figure below is with it off. Startup on the
-GB10, at a 49,152-token window: the model with its scratch takes 20.02 GiB (20.56 GiB with the 558 MiB draft head), a
-stream takes 1.00 GiB (1.09 GiB with drafts), and a kept prompt state takes 62 MiB plus 20 KiB a prompt token (24 KiB
-with drafts). Load took 7 to 31 s, the longer ones reading the weights from disk.
+Thinking is on by default in the chat template and `max_tokens` counts it; `--no-thinking` or `chat_template_kwargs:
+{"enable_thinking": false}` turns it off, and every figure below is with it off. Startup on the GB10, at a 49,152-token
+window: the model with its scratch takes 20.02 GiB (20.56 GiB with the 558 MiB draft head), a stream takes 1.00 GiB
+(1.09 GiB with drafts), and a kept prompt state takes 62 MiB plus 20 KiB a prompt token (24 KiB with drafts). Load took
+7 to 31 s, the longer ones reading the weights from disk.
 
 ## Parity with the Python 0.6.6 engine
 
@@ -87,9 +87,9 @@ prompt) with their prompt ids, greedy reply ids and parsed tool calls, plus the 
 | drafted, `--parallel 2`, two clients running the fixture at once | 7 of 7 equal, both | 6 of 6 equal, both | 2 of 2 equal, both |
 
 The drafted `--parallel 1` run accepted 41 of 68, 78 of 140, 22 of 50, 15 of 16, 123 of 297 and 16 of 18 drafted tokens
-on the six replies. Qwen3.6's own `tf-cuda-test qwen36-layers` stays byte-equal to the Python engine's dumps (all 40 layers, four
-prompts) with the vocabulary taken from the config. The tool-call smoke test (a tool call, the same call streamed, newlines in a plain answer) passes 3 of 3 on the drafted
-server.
+on the six replies. Qwen3.6's own `tf-cuda-test qwen36-layers` stays byte-equal to the Python engine's dumps (all 40
+layers, four prompts) with the vocabulary taken from the config. The tool-call smoke test (a tool call, the same call
+streamed, newlines in a plain answer) passes 3 of 3 on the drafted server.
 
 ## Measurements
 
@@ -112,15 +112,16 @@ The native rows are localeval runs `20261013-135101-adhoc-excl-native-minicpmv47
 with the Spark held exclusively; the Python rows are `20261013-005703-adhoc-tf-minicpmv47-mlx4-qwenmtp` and
 `20261013-012144-adhoc-tf-minicpmv47-mlx4-serial`, and vLLM's are from the Python recipe's table. Decode spread between
 reps is 14 to 22% on the drafted rows and one Qwen3.6 rep at 1k ran at 363 tok/s (that row's median is 118.9), so
-differences under 10% are noise. A first, non-exclusive pass of the same three sweeps (`20261013-132839-adhoc-native-minicpmv47-drafted`,
-`20261013-132700-adhoc-native-qwen36-drafted`) gave MiniCPM drafted 118.0, 127.1, 117.9, 107.9 and 138.5.
+differences under 10% are noise. A first, non-exclusive pass of the same three sweeps
+(`20261013-132839-adhoc-native-minicpmv47-drafted`, `20261013-132700-adhoc-native-qwen36-drafted`) gave MiniCPM drafted
+118.0, 127.1, 117.9, 107.9 and 138.5.
 
-Native drafted decode is at 76 to 84% of the Python engine's drafted decode in the four single-stream columns (and
-above it at two streams), native serial decode is at 87 to 88% of Python's serial decode, and native drafted decode is
-1.5 to 1.6 times its own serial decode. The native engine launches each op separately; the Python engine replays CUDA
-graphs. Against vLLM's NVFP4 server, which does not draft, native drafted decode is higher in every column (for example
-109.6 against 93.1 at 16k and 133.2 against 115.1 at two streams), and native serial decode is lower (70.0 against
-93.1 at 16k). The vLLM figures come from another day's run.
+Native drafted decode is at 76 to 84% of the Python engine's drafted decode in the four single-stream columns (and above
+it at two streams), native serial decode is at 87 to 88% of Python's serial decode, and native drafted decode is 1.5 to
+1.6 times its own serial decode. The native engine launches each op separately; the Python engine replays CUDA graphs.
+Against vLLM's NVFP4 server, which does not draft, native drafted decode is higher in every column (for example 109.6
+against 93.1 at 16k and 133.2 against 115.1 at two streams), and native serial decode is lower (70.0 against 93.1 at
+16k). The vLLM figures come from another day's run.
 
 Quality, `localeval quality --bench mmlu --limit 25 --max-tokens 2048 --judge none --thinking off`, 1,425 questions:
 
