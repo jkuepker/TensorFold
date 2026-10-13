@@ -1,0 +1,11 @@
+//! Qwen3.5-family models on CUDA: the MoE checkpoint on the GPU in the 27B engine's layouts, routed experts last.
+
+pub const pack = @import("cuda/pack.zig");
+pub const experts = @import("cuda/experts.zig");
+pub const weights = @import("cuda/weights.zig");
+
+test {
+    _ = pack;
+    _ = experts;
+    _ = weights;
+}

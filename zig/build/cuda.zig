@@ -149,6 +149,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     qwen_cli.addImport("qwen27", mods.qwen27);
     b.installArtifact(b.addExecutable(.{ .name = "tf-qwen27-cuda", .root_module = qwen_cli }));
     b.installArtifact(qwen35Index(b, target, optimize, mods.core));
+    b.installArtifact(qwen35Upload(b, target, optimize, cuda, mods.core, mods.qwen27));
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
@@ -162,6 +163,19 @@ fn qwen35Index(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen35_index.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("qwen35", qwen35Loader(b, target, optimize, core));
     return b.addExecutable(.{ .name = "tf-qwen35-index", .root_module = m });
+}
+
+/// `tf-qwen35-upload DIR`: a Qwen3.5-family MoE checkpoint on the GPU (qwen3_5/cuda.zig), its bytes reported.
+fn qwen35Upload(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Step.Compile {
+    const gpu = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    gpu.addImport("cuda", cuda);
+    gpu.addImport("core", core);
+    gpu.addImport("qwen27", qwen27);
+    gpu.addImport("qwen35", qwen35Loader(b, target, optimize, core));
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen35_upload.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("cuda", cuda);
+    m.addImport("qwen35_cuda", gpu);
+    return b.addExecutable(.{ .name = "tf-qwen35-upload", .root_module = m });
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.

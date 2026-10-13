@@ -10,7 +10,25 @@ const kern = @import("kernels.zig");
 
 pub const QLinear = kern.QLinear;
 const Tensor = core.checkpoint.Tensor;
-const prefix = "language_model.";
+pub const prefix = "language_model.";
+
+/// What the loader needs of a kernel set: the stream and the two functions that tile MLX 4-bit words and tables.
+pub const Pack = struct {
+    d: *const cuda.Driver,
+    s: cuda.Stream,
+    pack_dense: cuda.Function,
+    transpose16: cuda.Function,
+    discrete: bool,
+
+    pub fn of(ops: kern.Ops) Pack {
+        return .{ .d = ops.k.d, .s = ops.s, .pack_dense = ops.k.pack_dense, .transpose16 = ops.k.transpose16, .discrete = ops.k.discrete };
+    }
+
+    pub fn upload(p: Pack, dst: u64, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        try p.d.check(p.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, p.s.handle), "cuMemcpyHtoDAsync");
+    }
+};
 
 /// The token table as stored (MLX words, scales, biases): a row lookup, not a matmul.
 pub const Embed = struct { w: u64, s: u64, b: u64 };
@@ -51,47 +69,47 @@ pub const Weights = struct {
     }
 };
 
-const Loader = struct {
+pub const Loader = struct {
     gpa: std.mem.Allocator,
-    ops: kern.Ops,
+    pack: Pack,
     w: *Weights,
     src: *source.Source,
     scratch: cuda.DeviceBuffer,
     host: std.ArrayList(u8) = .empty,
 
-    fn alloc(L: *Loader, len: usize) !u64 {
-        const b = try cuda.DeviceBuffer.alloc(L.ops.k.d, len);
+    pub fn alloc(L: *Loader, len: usize) !u64 {
+        const b = try cuda.DeviceBuffer.alloc(L.pack.d, len);
         try L.w.buffers.append(L.gpa, b);
         return b.ptr;
     }
 
     /// Device scratch of at least `len` bytes; growing waits for the stream so pending packs keep their inputs.
-    fn tmp(L: *Loader, len: usize) !u64 {
+    pub fn tmp(L: *Loader, len: usize) !u64 {
         if (L.scratch.len < len) {
             try L.src.flush();
-            try L.ops.s.synchronize();
+            try L.pack.s.synchronize();
             L.scratch.free();
-            L.scratch = try cuda.DeviceBuffer.alloc(L.ops.k.d, len);
+            L.scratch = try cuda.DeviceBuffer.alloc(L.pack.d, len);
         }
         return L.scratch.ptr;
     }
 
     /// The host staging buffer, once the stream has read its last contents.
-    fn staging(L: *Loader, len: usize) ![]u8 {
+    pub fn staging(L: *Loader, len: usize) ![]u8 {
         try L.src.flush();
-        try L.ops.s.synchronize();
+        try L.pack.s.synchronize();
         try L.host.resize(L.gpa, len);
         return L.host.items;
     }
 
-    fn raw(L: *Loader, t: Tensor) !u64 {
+    pub fn raw(L: *Loader, t: Tensor) !u64 {
         const ptr = try L.alloc(t.bytes.len);
         try L.src.upload(ptr, t.bytes);
         return ptr;
     }
 
     /// `.float()` of a bf16 tensor (or an f32 one as stored): exact.
-    fn widen(L: *Loader, t: Tensor) !u64 {
+    pub fn widen(L: *Loader, t: Tensor) !u64 {
         if (t.dtype == .f32) return L.raw(t);
         if (t.dtype != .bf16) return error.UnexpectedTensor;
         const n = t.bytes.len / 2;
@@ -99,12 +117,12 @@ const Loader = struct {
         const in = try L.src.view(t.bytes);
         for (out, 0..) |*o, i| o.* = @as(u32, std.mem.readInt(u16, in[2 * i ..][0..2], .little)) << 16;
         const ptr = try L.alloc(n * 4);
-        try L.ops.upload(ptr, L.host.items);
+        try L.pack.upload(ptr, L.host.items);
         return ptr;
     }
 
     /// qmm_fast.tile: MLX words, scales and biases packed into the lane matmul's tiled layout.
-    fn tile(L: *Loader, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !QLinear {
+    pub fn tile(L: *Loader, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !QLinear {
         var parts: [3]Tensor = undefined;
         var buf: [192]u8 = undefined;
         for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |s, i| parts[i] = try ck.get(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, s }));
@@ -128,24 +146,24 @@ const Loader = struct {
         for ([_]usize{ n, k8, kg }) |v| a.add(@as(c_int, @intCast(v)));
         a.add(q.w);
         a.add(@as(c_longlong, @intCast(total)));
-        try cuda.launch.launch(L.ops.k.pack_dense, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, L.ops.s, &a);
+        try cuda.launch.launch(L.pack.pack_dense, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, L.pack.s, &a);
         for ([_]u64{ q.s, q.b }, [_]usize{ at[1], at[2] }) |out, off| {
             var t: cuda.Args = .{};
             t.add(base + off);
             for ([_]usize{ n, kg, npad }) |v| t.add(@as(c_int, @intCast(v)));
             t.add(out);
             const cells = @as(u64, kg) * npad;
-            try cuda.launch.launch(L.ops.k.transpose16, .{ .grid = .{ .x = @intCast((cells + 255) / 256) }, .block = .{ .x = 256 } }, L.ops.s, &t);
+            try cuda.launch.launch(L.pack.transpose16, .{ .grid = .{ .x = @intCast((cells + 255) / 256) }, .block = .{ .x = 256 } }, L.pack.s, &t);
         }
         return q;
     }
 
-    fn vector(L: *Loader, ck: *core.Checkpoint, name: []const u8, len: usize) !u64 {
+    pub fn vector(L: *Loader, ck: *core.Checkpoint, name: []const u8, len: usize) !u64 {
         var buf: [192]u8 = undefined;
         return L.raw(try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, name }), .bf16, &.{len}));
     }
 
-    fn delta(L: *Loader, ck: *core.Checkpoint, p: []const u8, g: c.Geometry) !Delta {
+    pub fn delta(L: *Loader, ck: *core.Checkpoint, p: []const u8, g: c.Geometry) !Delta {
         var b1: [160]u8 = undefined;
         var b2: [192]u8 = undefined;
         const at = struct {
@@ -167,7 +185,7 @@ const Loader = struct {
         return d;
     }
 
-    fn attention(L: *Loader, ck: *core.Checkpoint, p: []const u8, g: c.Geometry) !Attention {
+    pub fn attention(L: *Loader, ck: *core.Checkpoint, p: []const u8, g: c.Geometry) !Attention {
         var b1: [160]u8 = undefined;
         const at = struct {
             fn f(buf: []u8, pre: []const u8, name: []const u8) ![]const u8 {
@@ -183,6 +201,37 @@ const Loader = struct {
             .k_norm = try L.vector(ck, try at(&b1, p, "k_norm.weight"), c.head_dim),
         };
     }
+
+    /// The reads and copies queued so far finished: host memory they read may go.
+    pub fn settle(L: *Loader) !void {
+        try L.src.flush();
+        try L.pack.s.synchronize();
+    }
+
+    pub fn close(L: *Loader) void {
+        L.settle() catch {};
+        L.scratch.free();
+        L.host.deinit(L.gpa);
+    }
+
+    /// The token table as stored, the final norm and the output head.
+    pub fn ends(L: *Loader, ck: *core.Checkpoint, hidden: usize) !void {
+        L.w.embed = .{
+            .w = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.weight", .u32, &.{ c.vocab, hidden / 8 })),
+            .s = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.scales", .bf16, &.{ c.vocab, hidden / 64 })),
+            .b = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.biases", .bf16, &.{ c.vocab, hidden / 64 })),
+        };
+        L.w.norm = try L.vector(ck, "model.norm.weight", hidden);
+        L.w.head = try L.tile(ck, "lm_head", c.vocab, hidden);
+    }
+
+    /// weights.inv_freq on the device.
+    pub fn rotary(L: *Loader) !void {
+        var inv: [c.rotary_dim / 2]f32 = undefined;
+        invFreq(&inv);
+        L.w.inv_freq = try L.alloc(@sizeOf(@TypeOf(inv)));
+        try L.pack.upload(L.w.inv_freq, std.mem.asBytes(&inv));
+    }
 };
 
 /// weights.inv_freq: theta ** (-i / half) in float64, rounded to fp32.
@@ -191,20 +240,23 @@ pub fn invFreq(out: []f32) void {
     for (out, 0..) |*f, i| f.* = @floatCast(std.math.pow(f64, c.theta, -@as(f64, @floatFromInt(i)) / half));
 }
 
+/// A loader writing into `w` on `pack`'s stream, reading the files `src` knows; `close` it when the uploads are done.
+pub fn open(gpa: std.mem.Allocator, pack: Pack, w: *Weights, src: *source.Source) !Loader {
+    return .{ .gpa = gpa, .pack = pack, .w = w, .src = src, .scratch = try cuda.DeviceBuffer.alloc(pack.d, 1 << 20) };
+}
+
+pub const Source = source.Source;
+
 /// weights.load (tiled, one GPU): the model folder's text tensors on the GPU, leftovers refused.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, cfg: c.Config) !Weights {
     const g = cfg.g;
     var w: Weights = .{ .gpa = gpa, .g = g, .eos = cfg.eos, .eos_count = cfg.eos_count };
     errdefer w.deinit();
-    var src = try source.Source.init(gpa, .{ .d = ops.k.d, .s = ops.s, .discrete = ops.k.discrete });
+    const pack = Pack.of(ops);
+    var src = try source.Source.init(gpa, .{ .d = pack.d, .s = pack.s, .discrete = pack.discrete });
     defer src.deinit();
-    var L: Loader = .{ .gpa = gpa, .ops = ops, .w = &w, .src = &src, .scratch = try cuda.DeviceBuffer.alloc(ops.k.d, 1 << 20) };
-    defer {
-        src.flush() catch {};
-        ops.s.synchronize() catch {};
-        L.scratch.free();
-        L.host.deinit(gpa);
-    }
+    var L = try open(gpa, pack, &w, &src);
+    defer L.close();
     // the vision tower and the MTP head stay on disk, as weights._Tensors skips them
     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix);
     defer ck.close();
@@ -226,20 +278,10 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         layer.down = try L.tile(&ck, try join(&nb, p, "mlp.down_proj"), g.hidden, g.intermediate);
         layer.post_norm = try L.vector(&ck, try join(&nb, p, "post_attention_layernorm.weight"), g.hidden);
     }
-    w.embed = .{
-        .w = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.weight", .u32, &.{ c.vocab, g.hidden / 8 })),
-        .s = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.scales", .bf16, &.{ c.vocab, g.hidden / 64 })),
-        .b = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.biases", .bf16, &.{ c.vocab, g.hidden / 64 })),
-    };
-    w.norm = try L.vector(&ck, "model.norm.weight", g.hidden);
-    w.head = try L.tile(&ck, "lm_head", c.vocab, g.hidden);
+    try L.ends(&ck, g.hidden);
     if (ck.unused() != 0) return error.UnusedCheckpointTensors;
-    var inv: [c.rotary_dim / 2]f32 = undefined;
-    invFreq(&inv);
-    w.inv_freq = try L.alloc(@sizeOf(@TypeOf(inv)));
-    try ops.upload(w.inv_freq, std.mem.asBytes(&inv));
-    try src.flush();
-    try ops.s.synchronize();
+    try L.rotary();
+    try L.settle();
     return w;
 }
 
