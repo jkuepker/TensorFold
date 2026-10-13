@@ -319,7 +319,7 @@ pub fn run(gpu: check.Gpu, aot_dir: []const u8) !void {
     defer if (control) |c| gpa.free(c);
     var native = if (control) |c| try prep.Native.loadImage(gpu.d, try gpu.ctx.capability(), c) else try prep.Native.load(gpu.d, try gpu.ctx.capability());
     defer native.deinit();
-    var r: Rig = .{ .gpu = gpu, .s = s, .replay = .{ .set = &set, .s = s }, .native = .{ .set = &set, .s = s, .native = &native } };
+    var r: Rig = .{ .gpu = gpu, .s = s, .replay = .{ .set = &set, .s = s }, .native = .{ .set = &set, .s = s, .prep = &native } };
     var prng = std.Random.DefaultPrng.init(0x7e57_9e9e);
     const rng = prng.random();
     var gdn_entries: usize = 0;

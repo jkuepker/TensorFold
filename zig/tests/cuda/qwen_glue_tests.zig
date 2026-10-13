@@ -431,7 +431,7 @@ pub fn run(gpu: Gpu, aot_dir: []const u8, oracle: ?[]const u8) !void {
     defer native.deinit();
     var r: Rig = .{ .gpu = gpu, .s = try cuda.Stream.init(gpu.d, true), .native = native, .replay = undefined, .prng = std.Random.DefaultPrng.init(seed) };
     defer if (r.kinds.len != 0) gpu.gpa.free(r.kinds);
-    r.replay = .{ .set = &set, .s = r.s, .native = null };
+    r.replay = .{ .set = &set, .s = r.s, .glue = null };
     var entries: usize = 0;
     for (set.variants) |v| {
         const name = v.spec.@"fn";

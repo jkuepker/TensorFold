@@ -229,7 +229,11 @@ pub fn run(gpu: check.Gpu, model: []const u8, kernels: []const u8, oracle: []con
     defer scratch.deinit();
     var block = try qwen35.moe.Block.load(gpu.ctx, stream, g, prompt_rows, &k.triton);
     defer block.deinit();
-    var f: Forward = .{ .gpa = gpa, .w = &w.base, .ops = .{ .k = &k, .s = stream }, .t = k.tri(stream), .s = &scratch };
+    var tree = qwen27.tree_native.Native.load(gpu.d, try gpu.ctx.capability()) catch |e| if (e == error.UnverifiedArchitecture) null else return e;
+    defer if (tree) |*n| n.deinit();
+    var t = k.tri(stream);
+    t.tree = tree;
+    var f: Forward = .{ .gpa = gpa, .w = &w.base, .ops = .{ .k = &k, .s = stream }, .t = t, .s = &scratch };
     var run_: Run = .{ .gpu = gpu, .f = &f, .block = &block, .w = &w, .teacher = teacher, .oracle = oracle, .arena = .init(gpa) };
     defer run_.arena.deinit();
     f.hooks = .{ .ctx = &run_, .mlp = Run.mlp, .norm = Run.norm };

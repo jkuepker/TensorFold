@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const aot = cuda.aot;
 const glue = @import("glue_native.zig");
 const prep = @import("prep_native.zig");
+const native = @import("tree_native.zig");
 
 const p = aot.ptr;
 
@@ -45,6 +46,7 @@ pub const Tri = struct {
     s: cuda.Stream,
     glue: ?*const glue.Native = null, // the built-in row glue where it is byte-equal (glue_native.exact), else the captured launch
     prep: ?*const prep.Native = null, // qwen_prep.cu's kernels where `prep.exact` says they are byte-equal (null: replay)
+    tree: ?native.Native = null, // qwen_attention.cu's kernels where `tree_native.exact` says they are byte-equal
 
     fn run(t: Tri, name: []const u8, grid: [3]u32, args: []const aot.Arg, consts: []const aot.Const) !void {
         try t.set.run(t.s, name, grid, args, consts);
@@ -116,18 +118,38 @@ pub const Tri = struct {
     pub fn attention(t: Tri, q: u64, kn: u64, vn: u64, base: u64, offs: u64, plan: Plan, part: Partials, out: u64, a: Attn) !void {
         const g = a.heads / a.kv_heads;
         const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(a.dim), -0.5));
-        const w = plan.width;
-        if (plan.n_items > 0) try t.run("_shared", .{ u(plan.n_items * a.kv_heads), 1, 1 }, &.{
+        const nat: ?native.Native = if (t.tree != null and native.fits(a)) t.tree else null;
+        if (plan.n_items > 0) {
+            if (nat) |n| {
+                if (native.exact.shared) try n.shared(t.s, q, base, offs, plan, part) else try t.replayShared(q, base, offs, plan, part, a, g, scale);
+            } else try t.replayShared(q, base, offs, plan, part, a, g, scale);
+        }
+        if (nat) |n| {
+            if (native.exact.tail) try n.tail(t.s, q, kn, vn, base, offs, plan, part) else try t.replayTail(q, kn, vn, base, offs, plan, part, a, g, scale);
+        } else try t.replayTail(q, kn, vn, base, offs, plan, part, a, g, scale);
+        if (nat) |n| {
+            if (native.exact.merge) try n.merge(t.s, plan, part, out) else try t.replayMerge(plan, part, out, a, g);
+        } else try t.replayMerge(plan, part, out, a, g);
+    }
+
+    pub fn replayShared(t: Tri, q: u64, base: u64, offs: u64, plan: Plan, part: Partials, a: Attn, g: usize, scale: f32) !void {
+        try t.run("_shared", .{ u(plan.n_items * a.kv_heads), 1, 1 }, &.{
             p("Q", "*bf16", q),             p("KC", "*bf16", base),   p("VC", "*bf16", base),   p("OFF", "*i64", offs),   p("STREAM", "*i32", plan.streams),
-            p("ITEMS", "*i32", plan.items), p("PO", "*fp32", part.o), p("PM", "*fp32", part.m), p("PL", "*fp32", part.l), int("W", w),
+            p("ITEMS", "*i32", plan.items), p("PO", "*fp32", part.o), p("PM", "*fp32", part.m), p("PL", "*fp32", part.l), int("W", plan.width),
         }, &.{ ci("H", a.heads), ci("HK", a.kv_heads), ci("D", a.dim), ci("G", g), ci("CH", chunk), aot.cf("SCALE", scale), ci("GR", group_chunks) });
+    }
+
+    pub fn replayTail(t: Tri, q: u64, kn: u64, vn: u64, base: u64, offs: u64, plan: Plan, part: Partials, a: Attn, g: usize, scale: f32) !void {
         const tails = 1 + (max_nodes + chunk - 1) / chunk;
-        try t.run("_tail", .{ u(w), u(a.kv_heads), u(tails) }, &.{
+        try t.run("_tail", .{ u(plan.width), u(a.kv_heads), u(tails) }, &.{
             p("Q", "*bf16", q),           p("KN", "*bf16", kn),           p("VN", "*bf16", vn),             p("KC", "*bf16", base),   p("VC", "*bf16", base),   p("OFF", "*i64", offs),   p("STREAM", "*i32", plan.streams),
-            p("ROWS", "*i32", plan.rows), p("PATHS", "*i32", plan.paths), p("DEPTHS", "*i32", plan.depths), p("PO", "*fp32", part.o), p("PM", "*fp32", part.m), p("PL", "*fp32", part.l), int("W", w),
+            p("ROWS", "*i32", plan.rows), p("PATHS", "*i32", plan.paths), p("DEPTHS", "*i32", plan.depths), p("PO", "*fp32", part.o), p("PM", "*fp32", part.m), p("PL", "*fp32", part.l), int("W", plan.width),
         }, &.{ ci("H", a.heads), ci("HK", a.kv_heads), ci("D", a.dim), ci("G", g), ci("CH", chunk), ci("MAXD", max_nodes), aot.cf("SCALE", scale), ci("GR", group_chunks) });
-        try t.run("_merge", .{ u(w), u(a.kv_heads), u(a.dim / merge_columns) }, &.{
-            p("PO", "*fp32", part.o), p("PM", "*fp32", part.m), p("PL", "*fp32", part.l), p("OUT", "*bf16", out), p("STREAM", "*i32", plan.streams), p("ROWS", "*i32", plan.rows), int("W", w),
+    }
+
+    pub fn replayMerge(t: Tri, plan: Plan, part: Partials, out: u64, a: Attn, g: usize) !void {
+        try t.run("_merge", .{ u(plan.width), u(a.kv_heads), u(a.dim / merge_columns) }, &.{
+            p("PO", "*fp32", part.o), p("PM", "*fp32", part.m), p("PL", "*fp32", part.l), p("OUT", "*bf16", out), p("STREAM", "*i32", plan.streams), p("ROWS", "*i32", plan.rows), int("W", plan.width),
         }, &.{ ci("H", a.heads), ci("D", a.dim), ci("G", g), ci("DS", merge_columns), ci("CH", chunk), ci("GR", group_chunks) });
     }
 };

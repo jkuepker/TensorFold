@@ -105,6 +105,8 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir:
     const g = m.w.base.g;
     e.k = try q.kernels.Kernels.load(gpa, io, ctx, kernels, g.linear_v_heads);
     errdefer e.k.deinit();
+    e.tree = try q.engine.Engine.treeKernels(ctx);
+    errdefer if (e.tree) |*n| n.deinit();
     m.block = try moe.Block.load(ctx, e.s, g, q.engine.prompt_rows, &e.k.triton);
     errdefer m.block.deinit();
     e.w = m.w.base;
