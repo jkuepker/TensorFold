@@ -49,7 +49,7 @@ class Graphs:
             if kv is not None:
                 kv[0][:st.pos].copy_(src[0][:st.pos])
                 kv[1][:st.pos].copy_(src[1][:st.pos])
-        dst.pos = st.pos
+        dst.pos, dst.rope_delta = st.pos, st.rope_delta          # an image prompt's shift; 0 for text
         self.mc.k[:mc.pos].copy_(mc.k[:mc.pos])
         self.mc.v[:mc.pos].copy_(mc.v[:mc.pos])
         self.mc.pos = mc.pos
@@ -78,12 +78,12 @@ class Graphs:
         parents = list(range(-1, width - 1))
         if entry is None:
             staged = stage(self.w, st, width, key[1])
-            staged.refresh(tokens, st.pos)
+            staged.refresh(tokens, st.pos, st.rope_delta)
             tree_forward(self.w, staged.ids, parents, st, hidden=True, staged=staged)      # compiles each kernel
             g, out = self._capture(lambda: tree_forward(self.w, staged.ids, parents, st, hidden=True, staged=staged))
             entry = self.target[key] = (g, staged, out)
         g, staged, out = entry
-        staged.refresh(tokens, st.pos)
+        staged.refresh(tokens, st.pos, st.rope_delta)
         g.replay()
         return out
 
