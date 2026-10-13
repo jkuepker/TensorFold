@@ -16,8 +16,8 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = q.engine.prompt_rows;
-/// Streams at once: serial only, until the MoE rows batch across lanes.
-pub const max_lanes: u32 = 1;
+/// Streams at once: the 27B's round holds this many windows.
+pub const max_lanes: u32 = q.state.max_streams;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1 };
 
@@ -46,7 +46,7 @@ pub const snap_rules = .{ .lookahead = 0, .min_prompt = 0 };
 
 /// What this engine refuses before any device work, in words; null when the flags may open it.
 pub fn refusal(_: bool, lanes_asked: u32, lanes_fixed: bool) ?[]const u8 {
-    if (lanes_fixed and lanes_asked > max_lanes) return "Qwen3.6 MoE serves one stream at a time on the native CUDA engine so far: serve with --parallel 1";
+    if (lanes_fixed and lanes_asked > max_lanes) return std.fmt.comptimePrint("Qwen3.6 MoE on the native CUDA engine serves at most {d} streams at once: serve with --parallel {d} or fewer", .{ max_lanes, max_lanes });
     return null;
 }
 
@@ -185,9 +185,10 @@ fn release(p: *anyopaque) void {
     own.gpa.destroy(own);
 }
 
-test "extra lanes are refused in words, drafts and one stream are not" {
+test "more lanes than a round holds are refused in words, drafts and fewer are not" {
     try std.testing.expect(refusal(true, 1, true) == null);
-    try std.testing.expect(refusal(false, 2, true) != null);
+    try std.testing.expect(refusal(false, max_lanes + 1, true) != null);
+    try std.testing.expect(refusal(false, 8, true) == null);
     try std.testing.expect(refusal(false, 8, false) == null);
     try std.testing.expect(refusal(false, 1, true) == null);
 }

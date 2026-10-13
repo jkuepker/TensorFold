@@ -137,11 +137,12 @@ fn keptAt(ctx: *anyopaque, at: u32) void {
     if (s.reuse.hook) |k| k.at(k.ptr, s, at);
 }
 
-test "a kept state is its DeltaNet layers' fixed part and the attention rows, in whole pages" {
+test "a kept state is its DeltaNet layers' fixed part, the attention rows and a head's rows, in whole pages" {
     const g = c.the_35b_a3b;
     const fixed = 30 * (g.deltaBytes() + g.convBytes());
-    try std.testing.expectEqual(std.mem.alignForward(usize, fixed, page), bytes(g, 0));
+    try std.testing.expectEqual(std.mem.alignForward(usize, fixed, page), bytes(g, 0, false));
     const per = 10 * 2 * g.kvInner() * 2;
-    try std.testing.expectEqual(std.mem.alignForward(usize, fixed + 4096 * per, page), bytes(g, 4096));
-    try std.testing.expect(bytes(g, 8192) > bytes(g, 4096));
+    try std.testing.expectEqual(std.mem.alignForward(usize, fixed + 4096 * per, page), bytes(g, 4096, false));
+    try std.testing.expect(bytes(g, 8192, false) > bytes(g, 4096, false));
+    try std.testing.expectEqual(std.mem.alignForward(usize, fixed + 4096 * (per + g.hidden * 2), page), bytes(g, 4096, true)); // a drafting stream's rows ride along
 }

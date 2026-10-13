@@ -282,6 +282,7 @@ def main() -> int:
     ap.add_argument("--weights-only", action="store_true", help="write weights.txt and stop")
     ap.add_argument("--context", type=int, default=8192)
     ap.add_argument("--mtp", action="store_true", help="the MTP head's calls and drafted rounds instead (capture_mtp.py)")
+    ap.add_argument("--lanes", type=int, default=0, help="N concurrent streams' shared rounds instead (capture_multi.py)")
     ap.add_argument("--tools", default="", help="folder of triton_aot_manifest.py: record every Triton launch (launches.json, jit.json)")
     a = ap.parse_args()
     if a.compare:
@@ -297,6 +298,10 @@ def main() -> int:
         import triton_aot_manifest as aot
 
         rec = aot.Recorder().install()
+    if a.lanes:
+        import capture_multi
+
+        return capture_multi.run(a, out, rec)
     if a.mtp:
         import capture_mtp
 
