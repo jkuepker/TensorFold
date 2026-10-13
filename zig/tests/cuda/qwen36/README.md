@@ -66,3 +66,10 @@ keyed draws, so a reply equals the same request alone. Prompts still run one at 
    count: each request alone first, then N at once (the 5k-token prompt and the seeded sampled request among them),
    then N at once with every second one sent with `"draft": false`; every reply must equal its solo reply token for
    token (the solo ones also equal the Python engine's serial replies).
+
+## MiniCPM-V 4.7 (text)
+
+`../minicpm/fixture.json` holds `serve_check.py record` output from a Python 0.6.6 MiniCPM-V 4.7 server (serial, drafts
+off, thinking off): six chat requests with their prompt ids, greedy reply ids and parsed tool calls. The native server
+(`minicpmv4_7`) answers it token for token, drafted and with `--draft-off`, alone and with two clients at once:
+`serve_check.py check URL ../minicpm/fixture.json [--draft-off]`. It uses the same captured kernel set as Qwen3.6.
