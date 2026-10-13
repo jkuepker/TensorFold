@@ -88,3 +88,7 @@ first instruction and marks the kernel `pdl` in `aot.json`. The loader launches 
 rebuilt SASS has the same instructions plus the wait (`ACQBULK`, ahead of every memory access); on some kernels ptxas
 also renames registers or reorders independent instructions around it, so the checks above must pass on the new set,
 as they do on the captured one. Point `TENSORFOLD_CUDA_KERNELS` at it.
+
+## Built-in row glue
+
+`qwen_glue.cu` (add_rmsnorm, gated_norm, gate_mul, group_sums, paths) and `embed_rows.cu`'s 4-bit rows replace those Triton launches on a GB10, with the cubins' element-to-thread order, sum trees and `sqrt.approx` / `div.full` / `ex2.approx` primitives. `tf-cuda-test qwen-glue <kernel set>` runs each of the set's entries (pointers an entry lists as unaligned sit 4 bytes off a boundary) beside the native kernel on identical buffers, zero rows, inf and NaN rows, subnormal and wide-range rows, and every row count the engine serves, and compares every output byte. `exact` in `families/qwen27/cuda/glue_native.zig` names the kernels that pass on every shape; a shape outside the tested constants (hidden 2048, 32 value heads of 128, 16 query heads of 256) still replays. `qwen36-layers` and `qwen36-mtp` then run with the native kernels in.

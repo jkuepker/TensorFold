@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const aot = cuda.aot;
+const glue = @import("glue_native.zig");
 
 const p = aot.ptr;
 
@@ -41,6 +42,7 @@ pub const Attn = struct { heads: usize, kv_heads: usize, dim: usize, half: usize
 pub const Tri = struct {
     set: *const aot.Set,
     s: cuda.Stream,
+    native: ?*const glue.Native = null, // the built-in row glue where it is byte-equal (glue_native.exact), else the captured launch
 
     fn run(t: Tri, name: []const u8, grid: [3]u32, args: []const aot.Arg, consts: []const aot.Const) !void {
         try t.set.run(t.s, name, grid, args, consts);
@@ -48,11 +50,13 @@ pub const Tri = struct {
 
     /// glue.embed: a 4-bit table row dequantized, one program a row and 64-group.
     pub fn embed(t: Tri, ids: u64, w: u64, s: u64, b: u64, out: u64, rows: usize, d: usize) !void {
+        if (t.native) |n| if (glue.exact.embed and glue.Native.fitsEmbed(d, out)) return n.embed(t.s, ids, w, s, b, out, rows, d);
         try t.run("_embed", .{ u(rows), u(d / 64), 1 }, &.{ p("IDS", "*i32", ids), p("Wt", "*i32", w), p("S", "*bf16", s), p("B", "*bf16", b), p("OUT", "*bf16", out) }, &.{ci("D", d)});
     }
 
     /// glue.add_rmsnorm: h = x + r (or x itself without r), y = rmsnorm(h) * w, xs = y's 64-group sums.
     pub fn addRmsnorm(t: Tri, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: u64, rows: usize, d: usize, eps: f32) !void {
+        if (t.native) |n| if (glue.exact.add_rmsnorm and glue.Native.fitsAddRmsnorm(&.{ x, r orelse x, w, h, y, xs }, d)) return n.addRmsnorm(t.s, x, r, w, h, y, xs, rows, eps);
         try t.run("_add_rmsnorm", .{ u(rows), 1, 1 }, &.{ p("X", "*bf16", x), p("R", "*bf16", r orelse x), p("W", "*bf16", w), p("H", "*bf16", if (r != null) h else x), p("Y", "*bf16", y), p("XS", "*fp32", xs), aot.float("eps", eps) }, &.{ ci("D", d), ci("BLOCK", pow2(d)), ci("HAS_R", @intFromBool(r != null)) });
     }
 
@@ -66,6 +70,7 @@ pub const Tri = struct {
 
     /// glue.gated_norm: silu(z) * rmsnorm(y) * w per value head, and its group sums.
     pub fn gatedNorm(t: Tri, y: u64, z: u64, w: u64, out: u64, xs: u64, rows: usize, vh: usize, dv: usize, eps: f32) !void {
+        if (t.native) |n| if (glue.exact.gated_norm and glue.Native.fitsGatedNorm(&.{ y, z, w, out, xs }, vh, dv)) return n.gatedNorm(t.s, y, z, w, out, xs, rows, vh, eps);
         try t.run("_gated_norm", .{ u(rows), u(vh), 1 }, &.{ p("Yr", "*bf16", y), p("Z", "*bf16", z), p("W", "*bf16", w), p("OUT", "*bf16", out), p("XS", "*fp32", xs), aot.float("eps", eps) }, &.{ ci("VH", vh), ci("DV", dv) });
     }
 
@@ -83,16 +88,19 @@ pub const Tri = struct {
 
     /// glue.gate_mul: the attention output times sigmoid(gate) from the [q | gate] rows, and its group sums.
     pub fn gateMul(t: Tri, o: u64, qg: u64, out: u64, xs: u64, rows: usize, heads: usize, dim: usize) !void {
+        if (t.native) |n| if (glue.exact.gate_mul and glue.Native.fitsGateMul(&.{ o, qg, out, xs }, heads, dim)) return n.gateMul(t.s, o, qg, out, xs, rows, heads);
         try t.run("_gate_mul", .{ u(rows), u(heads), 1 }, &.{ p("O", "*bf16", o), p("QG", "*bf16", qg), p("OUT", "*bf16", out), p("XS", "*fp32", xs) }, &.{ ci("H", heads), ci("D", dim) });
     }
 
     /// qmm.group_sums: each row's 64-group input sums in fp32 (rows may be strided by `ld`).
     pub fn groupSums(t: Tri, x: u64, xs: u64, ld: usize, rows: usize, k: usize) !void {
+        if (t.native) |n| if (glue.exact.group_sums and glue.Native.fitsGroupSums(&.{ x, xs }, ld, k)) return n.groupSums(t.s, x, xs, ld, rows, k);
         try t.run("_group_sums", .{ u(rows), cdiv(k / 64, 16), 1 }, &.{ p("X", "*bf16", x), p("XS", "*fp32", xs), int("ldx", ld) }, &.{ ci("KG", k / 64), ci("GS", 64), ci("GB", 16) });
     }
 
     /// attention.from_packed's _paths: each row's root-to-row window rows and its depth.
     pub fn paths(t: Tri, parents: u64, out: u64, depths: u64, rows: usize) !void {
+        if (t.native) |n| if (glue.exact.paths and glue.Native.fitsPaths(rows)) return n.paths(t.s, parents, out, depths, rows);
         try t.run("_paths", .{ u(rows), 1, 1 }, &.{ p("PARENTS", "*i32", parents), p("PATHS", "*i32", out), p("DEPTHS", "*i32", depths) }, &.{ci("MAXD", max_nodes)});
     }
 

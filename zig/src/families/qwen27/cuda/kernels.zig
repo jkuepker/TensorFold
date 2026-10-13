@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const glue_native = @import("glue_native.zig");
 pub const torch_ops = @import("nemotron").torch_ops;
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
@@ -54,6 +55,7 @@ pub const Kernels = struct {
     d: *const cuda.Driver,
     mods: [15]cuda.Module,
     triton: cuda.aot.Set,
+    glue: ?glue_native.Native, // the built-in row glue (null off GB10)
     group: cuda.Function,
     wide: [wide.len]cuda.Function, // tiles 3-5: rows <= 32, <= 64, more
     gemv: cuda.Function,
@@ -116,6 +118,8 @@ pub const Kernels = struct {
         k.prompt_chain = try k.mods[5].function(if (k.prompt_rows == 128) sym.chain128 else sym.chain64);
         k.triton = try cuda.aot.Set.load(gpa, io, d, ctx.device, triton_dir);
         errdefer k.triton.deinit();
+        k.glue = glue_native.Native.load(d, try ctx.capability()) catch |e| if (e == error.UnverifiedArchitecture) null else return e;
+        errdefer if (k.glue) |*g| g.deinit();
         try k.group.allowDynamicShared(group_smem);
         for (k.wide, wide) |f, t| try f.allowDynamicShared(t.smem);
         try k.gemv.allowDynamicShared(group_smem);
@@ -133,6 +137,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        if (k.glue) |*g| g.deinit();
         k.triton.deinit();
         for (&k.mods) |*m| m.unload();
     }
