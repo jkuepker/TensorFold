@@ -6,6 +6,7 @@ const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const grouped = @import("grouped.zig");
 const driver = @import("driver.zig");
+const abi = @import("abi.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -27,9 +28,10 @@ pub const Layer = struct {
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up
+    swiglu: bool = false, // affine4: up stacks gate then up as [E][NI/32][D/64][2][288] under SwiGLU, not one relu^2 projection
 };
 
-/// A call's epilogue: up with its format's activation (affine4 relu^2, else SwiGLU), down to fp32 or to bf16 sums.
+/// A call's epilogue: up with its layer's activation (SwiGLU, or relu^2 for nvfp4 `relu2` and affine4 without `swiglu`), down to fp32 or to bf16 sums.
 pub const Epi = enum { up, down_f32, down_bf16 };
 
 /// The rows in: bf16 `x` rows `stride` apart; `up` reads token rows (`slots` pairs a row), down reads pair rows.
@@ -47,11 +49,10 @@ pub const Grouped = struct {
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_bf16) return error.EpilogueNotBuilt;
-                if (skip >= 0 or l.limit != 0) return error.OptionNotBuilt;
-                const up = epi == .up;
-                const nb = (if (up) l.width else l.dims) / 32;
-                const w = Affine4Experts.view(l, up);
-                return a.run(s, up, in.x, in.stride, if (up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, items * nb);
+                if (skip >= 0 or (l.limit != 0 and !l.swiglu)) return error.OptionNotBuilt;
+                const nb = (if (epi == .up) l.width else l.dims) / 32;
+                const w = Affine4Experts.view(l, epi == .up);
+                return a.run(s, Affine4Experts.op(l, epi), in.x, in.stride, if (epi == .up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, if (epi == .up) l.limit else 0, items * nb);
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, false, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
@@ -64,11 +65,10 @@ pub const Grouped = struct {
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_f32) return error.EpilogueNotBuilt;
-                if (skip >= 0 or l.limit != 0) return error.OptionNotBuilt;
-                const up = epi == .up;
-                const nb = (if (up) l.width else l.dims) / 32;
-                const w = Affine4Experts.view(l, up);
-                return a.runPrompt(s, up, in.x, in.stride, if (up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, items);
+                if (skip >= 0 or (l.limit != 0 and !l.swiglu)) return error.OptionNotBuilt;
+                const nb = (if (epi == .up) l.width else l.dims) / 32;
+                const w = Affine4Experts.view(l, epi == .up);
+                return a.runPrompt(s, Affine4Experts.op(l, epi), in.x, in.stride, if (epi == .up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, if (epi == .up) l.limit else 0, items);
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
@@ -87,22 +87,29 @@ fn int(x: usize) c_int {
     return @intCast(x);
 }
 
-/// MLX affine-4 experts (experts.cu, experts_prefill.cu, experts_pack.cu): relu^2 up, down to fp32 or bf16 sums.
+/// MLX affine-4 experts (experts.cu, experts_prefill.cu, experts_pack.cu): relu^2 or SwiGLU up, down to fp32 or bf16 sums.
 pub const Affine4Experts = struct {
-    up_fn: Function,
-    down_fn: Function,
-    pre_up_fn: Function,
-    pre_down_fn: Function,
+    fns: [3]Function, // decode, by Op
+    pre_fns: [3]Function, // prompt, by Op
     pack_fn: Function,
-    resident: [2]usize, // blocks the decode up and down kernels fill: per SM times SMs
+    resident: [3]usize, // blocks the decode kernels fill: per SM times SMs
 
-    pub const prompt_smem: u32 = 38400; // Pre<64, 1, 2, 2, 4>: three stages of 800 uint4
+    /// A call's kernel: the up with relu^2 over one projection, the up with SwiGLU over gate and up, the down.
+    pub const Op = enum { up_relu2, up_swiglu, down };
+
+    pub const prompt_smem = [3]u32{ 38400, 34816, 38400 }; // Pre<64, M, ..>: M 1 three stages of 800 uint4, M 2 two of 1088
+
+    pub fn op(l: Layer, epi: Epi) Op {
+        return if (epi != .up) .down else if (l.swiglu) .up_swiglu else .up_relu2;
+    }
 
     /// The instances' names (cuobjdump -symbols of the experts, experts_prefill and experts_pack fatbins).
     pub const symbols = struct {
         pub const up = "_ZN10tf_experts13expert_kernelILi64ELi1ELi1ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        pub const up_swiglu = "_ZN10tf_experts13expert_kernelILi64ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
         pub const down = "_ZN10tf_experts13expert_kernelILi64ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
         pub const pre_up = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi1ELi1ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        pub const pre_up_swiglu = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi2ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
         pub const pre_down = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi1ELi3ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
         pub const pack = "_ZN15tf_experts_pack11pack_kernelILi2EEEvPKjPKtS4_Pjiiii";
     };
@@ -110,14 +117,15 @@ pub const Affine4Experts = struct {
     /// From loaded experts, experts_prefill and experts_pack modules.
     pub fn resolve(decode_mod: Module, prompt_mod: Module, pack_mod: Module, sms: usize) !Affine4Experts {
         var a: Affine4Experts = undefined;
-        a.up_fn = try decode_mod.function(symbols.up);
-        a.down_fn = try decode_mod.function(symbols.down);
-        a.pre_up_fn = try prompt_mod.function(symbols.pre_up);
-        a.pre_down_fn = try prompt_mod.function(symbols.pre_down);
+        const names = [3][:0]const u8{ symbols.up, symbols.up_swiglu, symbols.down };
+        const pre_names = [3][:0]const u8{ symbols.pre_up, symbols.pre_up_swiglu, symbols.pre_down };
+        for (names, pre_names, 0..) |name, pre, i| {
+            a.fns[i] = try decode_mod.function(name);
+            a.pre_fns[i] = try prompt_mod.function(pre);
+            try a.pre_fns[i].allowDynamicShared(prompt_smem[i]);
+            a.resident[i] = @max(1, try a.fns[i].occupancy(128, 0)) * sms;
+        }
         a.pack_fn = try pack_mod.function(symbols.pack);
-        try a.pre_up_fn.allowDynamicShared(prompt_smem);
-        try a.pre_down_fn.allowDynamicShared(prompt_smem);
-        a.resident = .{ @max(1, try a.up_fn.occupancy(128, 0)) * sms, @max(1, try a.down_fn.occupancy(128, 0)) * sms };
         return a;
     }
 
@@ -126,7 +134,7 @@ pub const Affine4Experts = struct {
         return if (up) .{ .ptr = l.up, .kg = l.dims / 64, .n = l.width } else .{ .ptr = l.down, .kg = l.width / 64, .n = l.dims };
     }
 
-    fn args(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) launch_.Args {
+    fn args(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, limit: f32) launch_.Args {
         var a: launch_.Args = .{};
         a.add(x);
         a.add(int(x_stride));
@@ -136,26 +144,28 @@ pub const Affine4Experts = struct {
         a.add(int(nb));
         for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
         a.add(int(n));
-        a.add(@as(f32, 0.0));
+        a.add(limit);
         return a;
     }
 
-    /// experts.run (decode form): `up` takes token rows (relu^2, bf16 out), else pair rows (fp32 out).
-    pub fn run(e: *const Affine4Experts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_units: usize) !void {
-        const grid = @min((max_units + 3) / 4, e.resident[if (up) 0 else 1]);
+    /// experts.run (decode form): the ups take token rows (bf16 out; `limit` clamps SwiGLU, 0 for none), the down pair rows (fp32 out).
+    pub fn run(e: *const Affine4Experts, s: Stream, o: Op, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, limit: f32, max_units: usize) !void {
+        const i = @intFromEnum(o);
+        const grid = @min((max_units + 3) / 4, e.resident[i]);
         if (grid < 1) return;
-        var a = args(x, x_stride, slots, w, kg, nb, p, out, n);
+        var a = args(x, x_stride, slots, w, kg, nb, p, out, n, limit);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 }, .shared = 0 };
-        try launch_.launch(if (up) e.up_fn else e.down_fn, cfg, s, &a);
+        try launch_.launch(e.fns[i], cfg, s, &a);
     }
 
-    /// experts.prefill: 64 pairs x 128 columns a CTA; `up` relu^2, else bf16 sums (epilogue 3).
-    pub fn runPrompt(e: *const Affine4Experts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_items: usize) !void {
+    /// experts.prefill: 64 pairs x 128 columns a CTA; the ups bf16 activations, the down bf16 sums (epilogue 3).
+    pub fn runPrompt(e: *const Affine4Experts, s: Stream, o: Op, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, limit: f32, max_items: usize) !void {
+        const i = @intFromEnum(o);
         const grid = max_items * ((nb + 3) / 4);
         if (grid < 1) return;
-        var a = args(x, x_stride, slots, w, kg, nb, p, out, n);
-        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .shared = prompt_smem };
-        try launch_.launch(if (up) e.pre_up_fn else e.pre_down_fn, cfg, s, &a);
+        var a = args(x, x_stride, slots, w, kg, nb, p, out, n, limit);
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .shared = prompt_smem[i] };
+        try launch_.launch(e.pre_fns[i], cfg, s, &a);
     }
 
     /// experts.make: e experts' MLX words (n, k/8), scales and biases (n, k/64) on the device into `out`'s blocks.
@@ -168,7 +178,21 @@ pub const Affine4Experts = struct {
         try launch_.launch(e.pack_fn, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(count) }, .block = .{ .x = 288 } }, s, &a);
     }
 
-    /// Bytes of e experts' blocks for n outputs from k inputs ([E][n/32][k/64][288] int32).
+    /// experts.make's SwiGLU up: gate then up packed into `out` as [E][n/32][k/64][2][288] int32 (torch.stack on dim 3).
+    /// `scratch` holds `bytes(count, n, k)`; each half is packed there, then copied to its slot of every block.
+    pub fn packGateUp(e: *const Affine4Experts, d: *const Driver, s: Stream, gate: Mats, up: Mats, scratch: u64, out: u64, count: usize, n: usize, k: usize) !void {
+        const block = 288 * 4;
+        for ([_]Mats{ gate, up }, 0..) |m, i| {
+            try e.pack(s, m.words, m.scales, m.biases, scratch, count, n, k);
+            const cp: abi.Memcpy2D = .{ .src = scratch, .src_pitch = block, .dst = out + i * block, .dst_pitch = 2 * block, .width = block, .height = count * (n / 32) * (k / 64) };
+            try d.check(d.api.cuMemcpy2DAsync_v2(&cp, s.handle), "cuMemcpy2DAsync");
+        }
+    }
+
+    /// One projection's MLX arrays on the device: words (E, n, k/8) u32, scales and biases (E, n, k/64) bf16.
+    pub const Mats = struct { words: u64, scales: u64, biases: u64 };
+
+    /// Bytes of e experts' blocks for n outputs from k inputs ([E][n/32][k/64][288] int32); a SwiGLU up takes twice.
     pub fn bytes(count: usize, n: usize, k: usize) usize {
         return count * (n / 32) * (k / 64) * 288 * 4;
     }
@@ -477,4 +501,10 @@ test "a format that is not loaded, or an option it was not built with, is refuse
     try std.testing.expectError(error.EpilogueNotBuilt, h.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
     try std.testing.expectError(error.EpilogueNotBuilt, h.prompt(s, .down_f32, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
     try std.testing.expectError(error.OptionNotBuilt, h.decode(s, .up, .{ .x = 0, .stride = 64 }, la, p, 0, 1, 3));
+    la.limit = 7;
+    try std.testing.expectError(error.OptionNotBuilt, h.decode(s, .up, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
+    try std.testing.expectEqual(Affine4Experts.Op.up_relu2, Affine4Experts.op(la, .up));
+    la.swiglu = true;
+    try std.testing.expectEqual(Affine4Experts.Op.up_swiglu, Affine4Experts.op(la, .up));
+    try std.testing.expectEqual(Affine4Experts.Op.down, Affine4Experts.op(la, .down_f32));
 }
