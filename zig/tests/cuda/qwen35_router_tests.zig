@@ -112,6 +112,13 @@ const Rig = struct {
         return error.BadCase;
     }
 
+    fn step(r: *Rig, comptime path: []const u8, comptime name: []const u8, x: u64, w: u64, l: u64, p: u64, wt: u64, y: u64, o: u64, m: usize) !void {
+        const route = if (comptime std.mem.eql(u8, path, "replay")) router.Router{ .replay = r.replay, .native = null } else router.Router{ .replay = null, .native = r.native };
+        if (comptime std.mem.eql(u8, name, "logits")) try route.logits(x, w, l, m, r.sh);
+        if (comptime std.mem.eql(u8, name, "select")) try route.select(l, p, wt, m, r.sh);
+        if (comptime std.mem.eql(u8, name, "combine")) try route.combine(y, false, wt, o, m, r.sh);
+    }
+
     fn fixtureCase(r: *Rig, case: []const u8, shared_rows: ?[]const u8) !void {
         const gpa = r.gpu.gpa;
         if (std.mem.eql(u8, case, "weights")) return;
@@ -236,12 +243,55 @@ fn sweep(r: *Rig, rounds: usize) !void {
     }
 }
 
+// Microseconds a router step takes back to back at `m` rows, replay against native (information, not a gate).
+fn timing(r: *Rig, m: usize) !void {
+    const ne = r.sh.experts + 1;
+    const slots = r.sh.top_k + 1;
+    var xb = try r.out(m * r.sh.d * 2);
+    defer xb.free();
+    try r.s.synchronize();
+    var wb = try r.out(ne * r.sh.d * 2);
+    defer wb.free();
+    var lb = try r.out(m * ne * 4);
+    defer lb.free();
+    var pb = try r.out(m * slots * 4);
+    defer pb.free();
+    var wt = try r.out(m * slots * 4);
+    defer wt.free();
+    var yb = try r.out(m * slots * r.sh.d * 4);
+    defer yb.free();
+    var ob = try r.out(m * r.sh.d * 2);
+    defer ob.free();
+    try r.s.synchronize();
+    // finite inputs: a router over zeros, ties everywhere
+    try xb.fill8(0, r.s.handle);
+    try wb.fill8(0, r.s.handle);
+    try lb.fill8(0, r.s.handle);
+    try yb.fill8(0, r.s.handle);
+    try wt.fill8(0, r.s.handle);
+    var start = try cuda.Event.init(r.gpu.d, true);
+    defer start.deinit();
+    var end = try cuda.Event.init(r.gpu.d, true);
+    defer end.deinit();
+    const reps = 200;
+    inline for (.{ "replay", "native" }) |path| {
+        inline for (.{ "logits", "select", "combine" }) |step| {
+            for (0..10) |_| try r.step(path, step, xb.ptr, wb.ptr, lb.ptr, pb.ptr, wt.ptr, yb.ptr, ob.ptr, m);
+            try start.record(r.s);
+            for (0..reps) |_| try r.step(path, step, xb.ptr, wb.ptr, lb.ptr, pb.ptr, wt.ptr, yb.ptr, ob.ptr, m);
+            try end.record(r.s);
+            try end.synchronize();
+            std.debug.print("  {d:>5} rows {s:<6} {s:<7} {d:>7.2} us\n", .{ m, path, step, @as(f64, try cuda.Event.elapsedMs(start, end)) * 1000 / reps });
+        }
+    }
+}
+
 pub fn run(gpu: Gpu, aot_dir: []const u8, dir: []const u8, rounds: usize) !void {
     const gpa = gpu.gpa;
     var set = try cuda.aot.Set.load(gpa, gpu.io, gpu.d, gpu.ctx.device, aot_dir);
     defer set.deinit();
     const s = try cuda.Stream.init(gpu.d, true);
-    var native = try router.Native.load(gpu.d, s);
+    var native = try router.Native.load(gpu.d, s, try gpu.ctx.capability());
     defer native.deinit();
     const index_path = try std.fmt.allocPrint(gpa, "{s}/fixtures.json", .{dir});
     defer gpa.free(index_path);
@@ -267,6 +317,7 @@ pub fn run(gpu: Gpu, aot_dir: []const u8, dir: []const u8, rounds: usize) !void 
     const before = r.cases;
     try sweep(&r, rounds);
     std.debug.print("sweep: {d} comparisons, {d} differ (fixtures {d})\n", .{ r.cases - before, r.bad - fixture_bad, fixture_bad });
+    for ([_]usize{ 1, 16, 256 }) |m| try timing(&r, m);
     try check.expect(r.bad == 0, "{d} of {d} comparisons differ", .{ r.bad, r.cases });
     check.pass("qwen35-router: replay and native byte-equal to the Python engine over {d} comparisons", .{r.cases});
 }

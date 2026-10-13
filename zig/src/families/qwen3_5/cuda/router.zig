@@ -10,6 +10,9 @@ pub const exact: Exact = .{ .logits = true, .select = true, .combine = true };
 
 pub const Exact = struct { logits: bool, select: bool, combine: bool };
 
+/// The compute capability the byte-equality was shown on (GB10); the tensor-core dot's bits are an architecture's own.
+pub const verified_capability: u32 = 121;
+
 /// The layer shape: hidden width, routed experts (the shared expert's gate row follows them), picks a row.
 pub const Shape = struct { d: usize, experts: usize, top_k: usize };
 
@@ -35,7 +38,7 @@ pub fn tile(m: usize) usize {
     return 128;
 }
 
-/// The captured Triton launches, with moe.py's grids and constexprs.
+/// The captured Triton launches, with moe.py's grids and constexprs; pointers must be 16-aligned, as the captured variants are.
 pub const Replay = struct {
     set: *const aot.Set,
     s: cuda.Stream,
@@ -66,6 +69,10 @@ pub const Replay = struct {
     }
 };
 
+/// K columns the native router stages a step, and the dynamic shared bytes its stages take (qwen_route.cu's KC, STAGES, PAD).
+const stage_columns = 256;
+const router_shared: u32 = 3 * (16 + 32) * (stage_columns + 8) * 2;
+
 /// qwen_route.cu's kernels.
 pub const Native = struct {
     module: cuda.Module,
@@ -75,13 +82,16 @@ pub const Native = struct {
     combine_f32: cuda.Function,
     combine_bf16: cuda.Function,
 
-    pub fn load(d: *const cuda.Driver, s: cuda.Stream) !Native {
+    pub fn load(d: *const cuda.Driver, s: cuda.Stream, capability: u32) !Native {
+        if (capability != verified_capability) return error.UnverifiedArchitecture;
         var m = try cuda.Module.load(d, cuda.kernels.qwen_route);
         errdefer m.unload();
+        const router_fn = try m.function("tf_qwen_router");
+        try router_fn.allowDynamicShared(router_shared);
         return .{
             .module = m,
             .s = s,
-            .router_fn = try m.function("tf_qwen_router"),
+            .router_fn = router_fn,
             .topk_fn = try m.function("tf_qwen_topk"),
             .combine_f32 = try m.function("tf_qwen_combine_f32"),
             .combine_bf16 = try m.function("tf_qwen_combine_bf16"),
@@ -92,18 +102,18 @@ pub const Native = struct {
         n.module.unload();
     }
 
-    fn go(n: Native, f: cuda.Function, grid: [2]u32, block: u32, a: *cuda.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = block } }, n.s, a);
+    fn go(n: Native, f: cuda.Function, grid: [2]u32, block: u32, shared: u32, a: *cuda.Args) !void {
+        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = block }, .shared = shared }, n.s, a);
     }
 
     pub fn logits(n: Native, x: u64, w: u64, out: u64, m: usize, sh: Shape) !void {
-        if (sh.d % 16 != 0) return error.RouterShape;
+        if (sh.d % stage_columns != 0) return error.RouterShape;
         var a: cuda.Args = .{};
         a.add(x);
         a.add(w);
         a.add(out);
         for ([_]usize{ m, sh.d, sh.d, sh.experts + 1 }) |v| a.add(@as(c_int, @intCast(v)));
-        try n.go(n.router_fn, .{ cdiv(m, 16), cdiv(sh.experts + 1, 32) }, 128, &a);
+        try n.go(n.router_fn, .{ cdiv(m, 16), cdiv(sh.experts + 1, 32) }, 128, router_shared, &a);
     }
 
     pub fn select(n: Native, l: u64, pick: u64, wts: u64, rows: usize, sh: Shape) !void {
@@ -113,7 +123,7 @@ pub const Native = struct {
         a.add(pick);
         a.add(wts);
         for ([_]usize{ sh.experts, sh.experts + 1, sh.top_k }) |v| a.add(@as(c_int, @intCast(v)));
-        try n.go(n.topk_fn, .{ u(rows), 1 }, 32, &a);
+        try n.go(n.topk_fn, .{ u(rows), 1 }, 32, 0, &a);
     }
 
     pub fn combine(n: Native, y: u64, y_bf16: bool, wts: u64, out: u64, rows: usize, sh: Shape) !void {
@@ -122,7 +132,7 @@ pub const Native = struct {
         a.add(wts);
         a.add(out);
         for ([_]usize{ sh.top_k + 1, sh.d }) |v| a.add(@as(c_int, @intCast(v)));
-        try n.go(if (y_bf16) n.combine_bf16 else n.combine_f32, .{ u(rows), cdiv(sh.d, 512) }, 256, &a);
+        try n.go(if (y_bf16) n.combine_bf16 else n.combine_f32, .{ u(rows), cdiv(sh.d, 512) }, 256, 0, &a);
     }
 };
 

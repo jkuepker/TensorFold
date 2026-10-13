@@ -28,32 +28,66 @@ __device__ __forceinline__ float expf_tl(float x) { return ex2(__fmul_rn(x, LOG2
 
 }  // namespace
 
-// Warp (16-row tile, 8 experts of a 32-expert block): OUT[m][e] = x[m] . w[e], mma.m16n8k16 chained over K in order.
+constexpr int KC = 256, STAGES = 3, PAD = 8, LD = KC + PAD;  // K columns a stage, stages in flight, row padding against bank conflicts
+constexpr int ROWS_PER_TILE = 16, EXPERTS_PER_TILE = 32;
+constexpr int STAGE_ELEMS = (ROWS_PER_TILE + EXPERTS_PER_TILE) * LD;
+
+__device__ __forceinline__ void copy16(void* dst, const void* src, bool valid) {
+    const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
+    const int n = valid ? 16 : 0;  // zero fill: Triton's masked loads read 0.0
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(d), "l"(src), "r"(n));
+}
+
+// Block (16-row tile, 32 experts, 4 warps of 8): OUT[m][e] = x[m] . w[e], mma.m16n8k16 chained over K in order, K staged through shared memory.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_router(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                    float* __restrict__ OUT, int M, int x_stride, int D, int NE) {
+    extern __shared__ __align__(16) __nv_bfloat16 smem[];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = lane >> 2, t = lane & 3;
-    const int row0 = blockIdx.x * 16, e0 = (blockIdx.y * 4 + warp) * 8;
-    const bool ra = row0 + g < M, rb = row0 + g + 8 < M, eb = e0 + g < NE;
-    const uint32_t* x0 = reinterpret_cast<const uint32_t*>(X + static_cast<int64_t>(ra ? row0 + g : 0) * x_stride) + t;
-    const uint32_t* x1 = reinterpret_cast<const uint32_t*>(X + static_cast<int64_t>(rb ? row0 + g + 8 : 0) * x_stride) + t;
-    const uint32_t* w0 = reinterpret_cast<const uint32_t*>(W + static_cast<int64_t>(eb ? e0 + g : 0) * D) + t;
+    const int row0 = blockIdx.x * ROWS_PER_TILE, e0 = blockIdx.y * EXPERTS_PER_TILE;
+    const int chunks = D / KC;
+    auto issue = [&](int c) {
+        __nv_bfloat16* a = smem + (c % STAGES) * STAGE_ELEMS;
+        __nv_bfloat16* b = a + ROWS_PER_TILE * LD;
+        for (int i = threadIdx.x; i < ROWS_PER_TILE * (KC / 8); i += 128) {
+            const int r = i / (KC / 8), col = (i % (KC / 8)) * 8;
+            const bool ok = row0 + r < M;
+            copy16(a + r * LD + col, X + static_cast<int64_t>(ok ? row0 + r : 0) * x_stride + c * KC + col, ok);
+        }
+        for (int i = threadIdx.x; i < EXPERTS_PER_TILE * (KC / 8); i += 128) {
+            const int r = i / (KC / 8), col = (i % (KC / 8)) * 8;
+            const bool ok = e0 + r < NE;
+            copy16(b + r * LD + col, W + static_cast<int64_t>(ok ? e0 + r : 0) * D + c * KC + col, ok);
+        }
+        asm volatile("cp.async.commit_group;");
+    };
+    for (int c = 0; c < STAGES - 1; ++c) {
+        if (c < chunks) issue(c);
+        else asm volatile("cp.async.commit_group;");
+    }
     float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f;
-    if (e0 < NE) {
-#pragma unroll 8
-        for (int k = 0; k < D / 2; k += 8) {  // 16 columns a step, in 32-bit words
-            const uint32_t a0 = ra ? x0[k] : 0u, a1 = rb ? x1[k] : 0u, a2 = ra ? x0[k + 4] : 0u, a3 = rb ? x1[k + 4] : 0u;
-            const uint32_t b0 = eb ? w0[k] : 0u, b1 = eb ? w0[k + 4] : 0u;
+    for (int c = 0; c < chunks; ++c) {
+        asm volatile("cp.async.wait_group %0;" ::"n"(STAGES - 2));
+        __syncthreads();
+        if (c + STAGES - 1 < chunks) issue(c + STAGES - 1);
+        else asm volatile("cp.async.commit_group;");
+        const uint32_t* a = reinterpret_cast<const uint32_t*>(smem + (c % STAGES) * STAGE_ELEMS);
+        const uint32_t* b = reinterpret_cast<const uint32_t*>(smem + (c % STAGES) * STAGE_ELEMS + ROWS_PER_TILE * LD) + (warp * 8 + g) * (LD / 2);
+#pragma unroll
+        for (int k = 0; k < KC / 2; k += 8) {  // 16 columns a step, in 32-bit words
+            const uint32_t a0 = a[g * (LD / 2) + k + t], a1 = a[(g + 8) * (LD / 2) + k + t];
+            const uint32_t a2 = a[g * (LD / 2) + k + t + 4], a3 = a[(g + 8) * (LD / 2) + k + t + 4];
+            const uint32_t b0 = b[k + t], b1 = b[k + t + 4];
             asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
                          : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
                          : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
         }
     }
-    const int e = e0 + 2 * t;
-    if (ra && e < NE) OUT[static_cast<int64_t>(row0 + g) * NE + e] = c0;
-    if (ra && e + 1 < NE) OUT[static_cast<int64_t>(row0 + g) * NE + e + 1] = c1;
-    if (rb && e < NE) OUT[static_cast<int64_t>(row0 + g + 8) * NE + e] = c2;
-    if (rb && e + 1 < NE) OUT[static_cast<int64_t>(row0 + g + 8) * NE + e + 1] = c3;
+    const int e = e0 + warp * 8 + 2 * t;
+    if (row0 + g < M && e < NE) OUT[static_cast<int64_t>(row0 + g) * NE + e] = c0;
+    if (row0 + g < M && e + 1 < NE) OUT[static_cast<int64_t>(row0 + g) * NE + e + 1] = c1;
+    if (row0 + g + 8 < M && e < NE) OUT[static_cast<int64_t>(row0 + g + 8) * NE + e] = c2;
+    if (row0 + g + 8 < M && e + 1 < NE) OUT[static_cast<int64_t>(row0 + g + 8) * NE + e + 1] = c3;
 }
 
 // One warp a row: top-k by logit (lower id on ties), weights exp(l_k - l_0) / sum as bf16, then the shared slot's sigmoid gate.
