@@ -1,5 +1,4 @@
-// Qwen3.6's per-layer prep kernels, op for op as the Python engine's Triton glue ran them (glue.py _gdn_pre, _attn_prep).
-// Every float op is an explicit intrinsic: Triton's contractions (fma where its SASS fused) are written out, nothing else fuses.
+// Qwen3.6's prep kernels (glue.py _gdn_pre, _attn_prep) op for op as Triton ran them: explicit intrinsics, its fused fmas written out.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -42,7 +41,7 @@ __device__ __forceinline__ uint16_t bf_bits(float x) { return __bfloat16_as_usho
 // 1 / (1 + exp(-x)), tl.sigmoid.
 __device__ __forceinline__ float sigmoid_tl(float x) { return divf(1.0f, __fadd_rn(1.0f, expf_tl(__fsub_rn(0.0f, x)))); }
 
-// libdevice's logf as Triton's tl.log runs it (flush-to-zero build): x = 2^e (1 + m) split at 2/3, a degree-9 polynomial in m.
+// libdevice's logf as Triton's tl.log runs it: x = 2^e (1 + m) split at 2/3, a degree-9 polynomial in m.
 __device__ __forceinline__ float logf_tl(float x) {
     const int ix = __float_as_int(x);
     const int e = (ix - 0x3f2aaaab) & static_cast<int>(0xff800000u);
@@ -62,7 +61,7 @@ __device__ __forceinline__ float logf_tl(float x) {
     return x != 0.0f ? r : -__int_as_float(0x7f800000);
 }
 
-// Two warps' sums of a 64-thread block: each warp by xor butterfly (16, 8, 4, 2, 1), then warp 0's plus warp 1's.
+// A 64-thread block's sum: each warp by xor butterfly (16, 8, 4, 2, 1), then warp 0 plus warp 1.
 __device__ __forceinline__ float block64_sum(float v, float* part) {
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, off));
@@ -73,8 +72,7 @@ __device__ __forceinline__ float block64_sum(float v, float* part) {
 
 }  // namespace
 
-// Program (row, head), 64 threads of 2 channels: a 4-tap conv over the window [state; qkv] in tap order, SiLU, q/k RMS norm scaled by 1/DK
-// and 1/sqrt(DK), plain v, and for the value heads g and beta. MULTI: row r's state rows start at CS[SID[r] * NKEEP]. DK is 128.
+// Program (row, head), 64 threads of 2 channels: 4-tap conv over [state; qkv], SiLU, q/k norm (DK = 128), v, and g and beta per value head.
 extern "C" __global__ void __launch_bounds__(64)
     tf_qwen_gdn_pre(const uint16_t* __restrict__ QKV, const uint16_t* __restrict__ CS, const uint16_t* __restrict__ CW,
                     const int* __restrict__ WIN, const uint16_t* __restrict__ A, const uint16_t* __restrict__ B,
@@ -121,8 +119,7 @@ extern "C" __global__ void __launch_bounds__(64)
     BETA[row * VH + hv] = sigmoid_tl(bf(B[row * VH + hv]));
 }
 
-// Program (row, head), 64 threads of 4 elements: heads 0..H-1 are queries (from [q | gate] rows), H.. the keys; RMS norm with the
-// head's weight, then rotary over the first 2 * HALF elements (rotate-half), cos and sin of position * inv_freq. MROPE is not served.
+// Program (row, head), 64 threads of 4 elements (D = 256): q heads from the [q | gate] rows, then k heads; norm, then rotate-half rotary.
 extern "C" __global__ void __launch_bounds__(64)
     tf_qwen_attn_prep(const uint16_t* __restrict__ QG, const uint16_t* __restrict__ KV, const uint16_t* __restrict__ QN,
                       const uint16_t* __restrict__ KN, const int* __restrict__ POS, const float* __restrict__ INV,

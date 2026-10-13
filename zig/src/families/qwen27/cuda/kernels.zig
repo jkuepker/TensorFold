@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const prep_native = @import("prep_native.zig");
+const triton_glue = @import("triton.zig");
 pub const torch_ops = @import("nemotron").torch_ops;
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
@@ -133,6 +134,11 @@ pub const Kernels = struct {
         k.chip = .{ major, minor, @intCast(sms) };
         k.prep = prep_native.Native.load(d, @intCast(major * 10 + minor)) catch null;
         return k;
+    }
+
+    /// The Triton glue launches on `s`: native prep kernels where they were verified, the captured cubins otherwise.
+    pub fn tri(k: *Kernels, s: cuda.Stream) triton_glue.Tri {
+        return .{ .set = &k.triton, .s = s, .native = if (k.prep) |*n| n else null };
     }
 
     pub fn deinit(k: *Kernels) void {
