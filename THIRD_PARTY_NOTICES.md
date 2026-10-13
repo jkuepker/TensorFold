@@ -117,3 +117,12 @@ The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
 The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision adapter.
+
+## MiniCPM-V 4.7 CUDA image integration
+
+`src/tensorfold/vision/minicpm_cuda.py` ports the vision tower, window-attention merger and merger of transformers'
+`models/minicpmv4_7/modeling_minicpmv4_7.py`, and `src/tensorfold/vision/minicpm_processing.py` ports the slicing of
+`models/minicpmv4_6/image_processing_pil_minicpmv4_6.py` and the placeholder layout of
+`models/minicpmv4_7/processing_minicpmv4_7.py` (Apache-2.0, Copyright 2026 OpenBMB and the HuggingFace Inc. team),
+and vLLM's canvas M-RoPE from `vllm/model_executor/models/minicpmv4_7.py` (Apache-2.0, Copyright contributors to
+the vLLM project), without including those files.

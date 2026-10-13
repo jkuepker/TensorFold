@@ -3,6 +3,14 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **MiniCPM-V 4.7 35B-A3B on CUDA, text and images.** The `minicpmv4_7` family serves an MLX 4-bit conversion
+  (`tools/minicpmv47_to_mlx.py`) on the Qwen3.6 MoE engine, drafting with Qwen3.6's MTP layer since MiniCPM ships
+  none: on one DGX Spark it decodes 155/153/148/142 tok/s at 0.1k/1k/4k/16k-token prompts, against 99/102/101/93
+  for vLLM's NVFP4A16. `--vision` runs MiniCPM's own tower in BF16 with its slicing and canvas 3-D rotary positions;
+  replies to image prompts equal `"draft": false`. See [the recipe](docs/recipes/minicpm-v-4.7.md).
+
 ## 0.6.6 (6 Oct 2026)
 
 - **`--name-priority ID=background` on the CUDA server.** A request that names that served id (`--name` or an
