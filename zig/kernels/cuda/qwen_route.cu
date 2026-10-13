@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "pdl.cuh"
+
 namespace {
 
 constexpr float LOG2E = 1.4426950408889634f;  // Triton's tl.exp scales by this fp32 constant, then ex2.approx
@@ -42,6 +44,8 @@ __device__ __forceinline__ void copy16(void* dst, const void* src, bool valid) {
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_router(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                    float* __restrict__ OUT, int M, int x_stride, int D, int NE) {
     extern __shared__ __align__(16) __nv_bfloat16 smem[];
+    tf_grid_wait();
+    tf_grid_launch();
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = lane >> 2, t = lane & 3;
     const int row0 = blockIdx.x * ROWS_PER_TILE, e0 = blockIdx.y * EXPERTS_PER_TILE;
@@ -93,6 +97,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qwen_router(const __nv_bflo
 // One warp a row: top-k by logit (lower id on ties), weights exp(l_k - l_0) / sum as bf16, then the shared slot's sigmoid gate.
 extern "C" __global__ void __launch_bounds__(32) tf_qwen_topk(const float* __restrict__ L, int* __restrict__ PICK, float* __restrict__ WTS, int NE,
                                                                 int NL, int TOPK) {
+    tf_grid_wait();
     const int64_t r = blockIdx.x;
     const int lane = threadIdx.x;
     const int slots = TOPK + 1;
@@ -164,6 +169,7 @@ template <> __device__ __forceinline__ void load4<__nv_bfloat16>(const __nv_bflo
 // Block (row, 512 columns), four a thread: the slots summed in slot order as fp32 w * y fused multiply-adds, rounded once to bf16.
 template <typename T>
 __device__ __forceinline__ void combine(const T* __restrict__ Y, const float* __restrict__ W, __nv_bfloat16* __restrict__ OUT, int S, int D) {
+    tf_grid_wait();
     const int64_t r = blockIdx.x;
     const int d = blockIdx.y * 512 + threadIdx.x * 4;
     if (d >= D) return;

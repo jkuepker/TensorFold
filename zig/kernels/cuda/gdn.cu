@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include "pdl.cuh"
+
 namespace tf_gdn {
 
 constexpr int DK = 128;
@@ -138,6 +140,7 @@ __global__ void __launch_bounds__(32 * WARPS) tree_kernel(
         int nodes, __nv_bfloat16* __restrict__ y, int hk, int hv, int dv, Pending<QK> pending, float* final_state,
         const long long* __restrict__ final_table, bool vec) {
     extern __shared__ float4 smem[];
+    tf_grid_wait();
     int* order = reinterpret_cast<int*>(smem + WARPS * SLOTS * R * 32);
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int head = blockIdx.y, stream = blockIdx.z;
@@ -267,6 +270,7 @@ template <typename QK, int R, int WARPS>
 __global__ void __launch_bounds__(32 * WARPS) replay_kernel(
         const long long* __restrict__ table, int layers, const int* __restrict__ rows, int row_stride,
         const int* __restrict__ counts, int count_stride, float* __restrict__ out, int hk, int hv, int dv) {
+    tf_grid_wait();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int head = blockIdx.y, stream = blockIdx.z / layers, layer = blockIdx.z % layers;
     const int value0 = (blockIdx.x * WARPS + warp) * R;
