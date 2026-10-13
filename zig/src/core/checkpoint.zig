@@ -25,6 +25,7 @@ pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
         var it = parsed.value.object.get("weight_map").?.object.iterator();
         while (it.next()) |e| {
             const file = e.value_ptr.string;
+            if (std.mem.startsWith(u8, std.fs.path.basename(file), "vision")) continue; // MiniCPM's image tower
             if ((try seen.getOrPut(gpa, file)).found_existing) continue;
             try names.ensureUnusedCapacity(gpa, 1);
             names.appendAssumeCapacity(try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, file }, 0));

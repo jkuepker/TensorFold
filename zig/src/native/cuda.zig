@@ -12,7 +12,7 @@ const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, qwen27.native, qwen35.native };
+const registry = .{ nemotron.native, qwen27.native, qwen35.native, qwen35.minicpm };
 
 /// A family's prompt-cache copies (its snap_* functions). A comptime value so the store's pointer stays valid for the process.
 fn snapshots(comptime F: type) *const api.prompt_cache.Snapshots.VTable {

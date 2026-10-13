@@ -117,6 +117,11 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir:
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    return openWith(gpa, io, ctx, dir, kernels, o, null);
+}
+
+/// `open`, the MTP head read from `side` when given (a fine-tune of the same language model ships none).
+pub fn openWith(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options, side: ?[]const u8) !Loaded {
     // the glue runs the Python engine's Triton kernels, captured on this chip (no own glue kernels yet)
     const e = try engine(gpa, io, ctx, dir, kernels orelse return error.QwenNeedsCapturedKernels, o.context);
     errdefer e.deinit();
@@ -137,7 +142,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
     };
     if (o.drafts) {
-        try draftsOn(own, io, ctx, dir);
+        try draftsOn(own, io, ctx, dir, side);
         loaded.backend = own.drafted.backend();
         loaded.facts = own.drafted.facts(own.lanes.facts());
         loaded.stream_bytes = own.drafted.streamBytes(loaded.stream_bytes);
@@ -146,12 +151,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 }
 
 /// The MTP head from the checkpoint's side file (or its own tensors), its drafter and the wrapper; window costs timed first.
-fn draftsOn(own: *Owned, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !void {
+fn draftsOn(own: *Owned, io: std.Io, ctx: *const cuda.Context, dir: []const u8, side: ?[]const u8) !void {
     const e = own.e;
     const block: *moe.Block = &@as(*Moe, @ptrCast(@alignCast(e.hooks.?.ctx))).block;
     var packk = try pack.Kernels.load(ctx.d, e.s, (try ctx.attribute(.integrated)) == 0);
     defer packk.deinit();
-    const w = try mtp_weights.load(own.gpa, io, &packk, dir, e.w.g);
+    const w = try mtp_weights.loadFrom(own.gpa, io, &packk, dir, e.w.g, side);
     own.head = try mtp.Head.init(own.gpa, e, w, block);
     errdefer own.head.deinit();
     try e.s.synchronize();

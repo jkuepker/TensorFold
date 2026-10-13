@@ -10,6 +10,7 @@ pub const mtp_weights = @import("cuda/mtp_weights.zig");
 pub const mtp = @import("cuda/mtp.zig");
 pub const mtp_drafter = @import("cuda/mtp_drafter.zig");
 pub const native = @import("cuda/native.zig");
+pub const minicpm = @import("cuda/minicpm.zig");
 
 test {
     _ = pack;
@@ -22,4 +23,5 @@ test {
     _ = mtp;
     _ = mtp_drafter;
     _ = native;
+    _ = minicpm;
 }

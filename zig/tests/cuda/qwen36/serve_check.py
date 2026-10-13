@@ -3,6 +3,7 @@
 
   serve_check.py record URL FIXTURE   against a Python 0.6.6 server (serial, drafts off): writes the fixture
   serve_check.py check URL FIXTURE    against the native server: reruns it and compares
+  serve_check.py check URL FIXTURE --draft-off   the same with "draft": false on every request (serial on a drafting server)
 
 The fixture holds each request body, the chat prompt's token ids (/tokenize) and the greedy reply's token ids and
 parsed tool calls. `check` compares in this order and exits 1 on any difference: (a) prompt ids, (b) reply ids,
@@ -99,11 +100,13 @@ def tokenize(url: str, r: dict) -> list[int]:
     return post(url, "/tokenize", body)["tokens"]
 
 
-def complete(url: str, r: dict) -> dict:
+def complete(url: str, r: dict, draft_off: bool = False) -> dict:
     body = {"messages": r["messages"], "max_tokens": MAX_TOKENS, "temperature": 0, "stream": False,
             "return_token_ids": True, "chat_template_kwargs": r["chat_template_kwargs"]}
     if r.get("tools"):
         body["tools"] = r["tools"]
+    if draft_off:
+        body["draft"] = False
     t0 = time.time()
     reply = post(url, "/v1/chat/completions", body)
     choice = reply["choices"][0]
@@ -135,7 +138,7 @@ def first_difference(a: list[int], b: list[int]) -> str:
     return f"lengths {len(a)} vs {len(b)}"
 
 
-def check(url: str, path: str) -> int:
+def check(url: str, path: str, draft_off: bool = False) -> int:
     fixture = json.load(open(path))
     failed = 0
     stages = {"a": [], "b": [], "c": []}
@@ -146,7 +149,7 @@ def check(url: str, path: str) -> int:
         print(f"(a) {r['name']}: {'ok' if same else 'DIFF ' + first_difference(ids, r['prompt_ids'])} ({len(ids)} ids)", flush=True)
         if r.get("ids_only"):
             continue
-        answer = complete(url, r)
+        answer = complete(url, r, draft_off)
         same = answer["ids"] == r["reply_ids"]
         stages["b"].append(same)
         rate = answer["tokens_per_second"]
@@ -164,6 +167,8 @@ def check(url: str, path: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4 or sys.argv[1] not in ("record", "check"):
+    if len(sys.argv) not in (4, 5) or sys.argv[1] not in ("record", "check") or (len(sys.argv) == 5 and (sys.argv[1] != "check" or sys.argv[4] != "--draft-off")):
         sys.exit(__doc__)
-    sys.exit((record if sys.argv[1] == "record" else check)(sys.argv[2], sys.argv[3]))
+    if sys.argv[1] == "record":
+        sys.exit(record(sys.argv[2], sys.argv[3]))
+    sys.exit(check(sys.argv[2], sys.argv[3], len(sys.argv) == 5))

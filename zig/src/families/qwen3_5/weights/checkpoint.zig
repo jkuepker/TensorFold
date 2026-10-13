@@ -106,6 +106,14 @@ pub const Checkpoint = struct {
         return .{ .arena = arena, .body = body };
     }
 
+    /// Reads the MTP layer from `path` in place of the folder's `mtp*.safetensors` (a checkpoint that ships none).
+    pub fn useSide(c: *Checkpoint, path: []const u8) !void {
+        const a = c.files.arena.allocator();
+        const list = try a.alloc([]const u8, 1);
+        list[0] = try a.dupe(u8, path);
+        c.files.side = list;
+    }
+
     /// The MTP layer from `mtp*.safetensors` or the model's own shards; null when absent.
     pub fn mtp(c: *const Checkpoint) !?host.Mtp {
         const side = c.files.side;

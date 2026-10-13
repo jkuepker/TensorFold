@@ -33,6 +33,7 @@ pub const Geometry = struct {
     query_heads: usize,
     kv_heads: usize,
     moe: ?Moe = null,
+    vocab: usize = 248320, // the embedding's and head's rows, read from the checkpoint's config
 
     /// The DeltaNet input projection's row: queries, keys, then values.
     pub fn convDim(g: Geometry) usize {
@@ -104,24 +105,26 @@ pub const Config = struct {
 
 /// The parsed config as the CUDA engine's Config, when every shape the kernels assume is the 27B's.
 pub fn check(c: config.Config) !Config {
-    const g: Geometry = .{ .hidden = c.hidden, .intermediate = c.intermediate, .layers = c.layers, .linear_k_heads = c.k_heads, .linear_v_heads = c.v_heads, .query_heads = c.heads, .kv_heads = c.kv_heads };
-    if (!std.meta.eql(g, the_27b) or c.vocab != vocab or c.head_dim != head_dim or c.dk != linear_dim or c.dv != linear_dim) return error.UnsupportedQwenGeometry;
+    const g: Geometry = .{ .hidden = c.hidden, .intermediate = c.intermediate, .layers = c.layers, .linear_k_heads = c.k_heads, .linear_v_heads = c.v_heads, .query_heads = c.heads, .kv_heads = c.kv_heads, .vocab = c.vocab };
+    if (!std.meta.eql(g, the_27b) or c.head_dim != head_dim or c.dk != linear_dim or c.dv != linear_dim) return error.UnsupportedQwenGeometry;
     if (c.conv_kernel != conv_taps or c.rope_dims != rotary_dim or c.eps != eps or c.rope_theta != theta) return error.UnsupportedQwenGeometry;
     for (c.kinds[0..c.layers], 0..) |kind, i| if ((kind == .linear) != linear(i)) return error.UnsupportedQwenGeometry;
     return .{ .g = g, .eos = c.eos, .eos_count = c.eos_count };
 }
 
-/// The checkpoint shapes the weight upload serves: each pins every width the kernels assume.
+/// The checkpoint shapes the weight upload serves: each pins every width the kernels assume, the vocabulary apart.
 pub const known = [_]Geometry{ the_27b, the_35b_a3b };
 
 /// A host loader's spec (qwen3_5/config.zig `Spec`) and end ids as a Config, when it is a known shape.
 pub fn fromSpec(spec: anytype, eos: []const u32) !Config {
     const moe: ?Moe = if (spec.experts == 0) null else .{ .experts = spec.experts, .top_k = spec.top_k, .width = spec.moe_width, .shared_width = spec.shared_width };
-    const g: Geometry = .{ .hidden = spec.hidden, .intermediate = if (moe == null) spec.intermediate else 0, .layers = spec.n_layers, .linear_k_heads = spec.key_heads, .linear_v_heads = spec.value_heads, .query_heads = spec.heads, .kv_heads = spec.kv_heads, .moe = moe };
+    const g: Geometry = .{ .hidden = spec.hidden, .intermediate = if (moe == null) spec.intermediate else 0, .layers = spec.n_layers, .linear_k_heads = spec.key_heads, .linear_v_heads = spec.value_heads, .query_heads = spec.heads, .kv_heads = spec.kv_heads, .moe = moe, .vocab = spec.vocab };
     const listed = for (known) |k| {
-        if (std.meta.eql(g, k)) break true;
+        var same_vocab = k;
+        same_vocab.vocab = g.vocab;
+        if (std.meta.eql(g, same_vocab)) break true;
     } else false;
-    if (!listed or spec.vocab != vocab or spec.head_dim != head_dim or spec.key_dim != linear_dim or spec.value_dim != linear_dim) return error.UnsupportedQwenGeometry;
+    if (!listed or spec.vocab == 0 or spec.head_dim != head_dim or spec.key_dim != linear_dim or spec.value_dim != linear_dim) return error.UnsupportedQwenGeometry;
     if (spec.conv != conv_taps or spec.rotary_dim != rotary_dim or @as(f32, @floatCast(spec.eps)) != eps or @as(f32, @floatCast(spec.rope_theta)) != theta or spec.bits != 4 or spec.group != 64) return error.UnsupportedQwenGeometry;
     for (0..spec.n_layers) |i| if (spec.full(i) == linear(i)) return error.UnsupportedQwenGeometry;
     if (eos.len > config.max_eos) return error.UnsupportedQwenGeometry;
@@ -162,6 +165,10 @@ test "the 35B-A3B's spec passes, the 27B's check refuses it, and a changed width
     const ok = try fromSpec(s, &.{ 248046, 248044 });
     try std.testing.expectEqual(@as(usize, 2), ok.eos_count);
     try std.testing.expectEqual(@as(usize, 8), ok.g.moe.?.top_k);
+    try std.testing.expectEqual(vocab, ok.g.vocab);
+    s.vocab = 248144; // MiniCPM-V 4.7's text tower trims Qwen3.6's padded vocabulary
+    try std.testing.expectEqual(@as(usize, 248144), (try fromSpec(s, &.{248046})).g.vocab);
+    s.vocab = vocab;
     s.moe_width = 256;
     try std.testing.expectError(error.UnsupportedQwenGeometry, fromSpec(s, &.{248044}));
     s = .{};

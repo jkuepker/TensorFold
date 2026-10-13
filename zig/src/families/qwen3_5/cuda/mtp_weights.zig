@@ -117,7 +117,7 @@ fn draftHead(gpa: std.mem.Allocator, L: *w27.Loader, ck: *core.Checkpoint, ids: 
     defer for (gathered[0..made]) |t| gpa.free(@constCast(t.bytes));
     for (parts, &gathered) |p, *out| {
         const t = try ck.get(p.name);
-        if (t.rank != 2 or t.shape[0] != shape.vocab or t.bytes.len != shape.vocab * p.width) return error.UnexpectedTensor;
+        if (t.rank != 2 or t.shape[0] != g.vocab or t.bytes.len != g.vocab * p.width) return error.UnexpectedTensor;
         const rows = try gpa.alloc(u8, ids.len * p.width);
         for (ids, 0..) |id, j| @memcpy(rows[j * p.width ..][0..p.width], t.bytes[@as(usize, id) * p.width ..][0..p.width]);
         out.* = t;
@@ -132,8 +132,14 @@ fn draftHead(gpa: std.mem.Allocator, L: *w27.Loader, ck: *core.Checkpoint, ids: 
 
 /// The MTP layer beside the checkpoint (its side file, else its own shards) on the GPU, the trunk's geometry `g`.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir: []const u8, g: shape.Geometry) !Head {
+    return loadFrom(gpa, io, k, dir, g, null);
+}
+
+/// `load` reading the MTP layer from `side` when given (Qwen3.6's file beside a fine-tune that ships none).
+pub fn loadFrom(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir: []const u8, g: shape.Geometry, side: ?[]const u8) !Head {
     var host = try qwen35.Checkpoint.open(gpa, io, dir);
     defer host.close();
+    if (side) |path| try host.useSide(path);
     const moe = g.moe orelse return error.UnsupportedQwenGeometry;
     var m = (try host.mtp()) orelse return error.QwenCheckpointHasNoDraftHead;
     defer m.deinit();
@@ -145,7 +151,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir: []c
     var h: Head = undefined;
     h.base = .{ .gpa = gpa, .g = g };
     h.named = .empty;
-    h.ids = try draft_ids.load(gpa, shape.vocab);
+    h.ids = try draft_ids.load(gpa, g.vocab);
     errdefer gpa.free(h.ids);
     errdefer h.base.deinit();
     var src = try w27.Source.init(gpa, .{ .d = k.pack.d, .s = k.pack.s, .discrete = k.pack.discrete });

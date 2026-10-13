@@ -51,9 +51,9 @@ pub const Weights = struct {
     /// Every tensor of layer `i` and the ends, named as the oracle's weights.txt names them.
     fn names(w: *Weights, g: shape.Geometry) !void {
         const embed = w.base.embed;
-        try w.note(embed.w, shape.vocab * g.hidden / 2, "embed.weight", .{});
-        try w.note(embed.s, shape.vocab * g.hidden / 64 * 2, "embed.scales", .{});
-        try w.note(embed.b, shape.vocab * g.hidden / 64 * 2, "embed.biases", .{});
+        try w.note(embed.w, g.vocab * g.hidden / 2, "embed.weight", .{});
+        try w.note(embed.s, g.vocab * g.hidden / 64 * 2, "embed.scales", .{});
+        try w.note(embed.b, g.vocab * g.hidden / 64 * 2, "embed.biases", .{});
         try w.note(w.base.norm, g.hidden * 2, "norm", .{});
         try w.linear("head", .{}, w.base.head);
         try w.note(w.base.inv_freq, shape.rotary_dim / 2 * 4, "inv_freq", .{});

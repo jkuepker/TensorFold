@@ -470,7 +470,7 @@ pub const Forward = struct {
 
     /// Greedy picks of the scratch's first `rows` logits rows (torch.argmax, the first maximum).
     pub fn picks(f: *Forward, rows: usize, out: []u32) !void {
-        try f.ops.argmax(f.s.logits, c.vocab, c.vocab, f.s.picks, rows);
+        try f.ops.argmax(f.s.logits, f.w.g.vocab, f.w.g.vocab, f.s.picks, rows);
         try f.ops.download(std.mem.sliceAsBytes(out[0..rows]), f.s.picks);
         try f.ops.s.synchronize();
     }

@@ -224,12 +224,12 @@ pub const Loader = struct {
     /// The token table as stored, the final norm and the output head.
     pub fn ends(L: *Loader, ck: *core.Checkpoint, hidden: usize) !void {
         L.w.embed = .{
-            .w = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.weight", .u32, &.{ c.vocab, hidden / 8 })),
-            .s = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.scales", .bf16, &.{ c.vocab, hidden / 64 })),
-            .b = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.biases", .bf16, &.{ c.vocab, hidden / 64 })),
+            .w = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.weight", .u32, &.{ L.w.g.vocab, hidden / 8 })),
+            .s = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.scales", .bf16, &.{ L.w.g.vocab, hidden / 64 })),
+            .b = try L.raw(try ck.expect(prefix ++ "model.embed_tokens.biases", .bf16, &.{ L.w.g.vocab, hidden / 64 })),
         };
         L.w.norm = try L.vector(ck, "model.norm.weight", hidden);
-        L.w.head = try L.tile(ck, "lm_head", c.vocab, hidden);
+        L.w.head = try L.tile(ck, "lm_head", L.w.g.vocab, hidden);
     }
 
     /// weights.inv_freq on the device.

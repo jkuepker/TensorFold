@@ -316,12 +316,22 @@ pub const Spec = struct {
     }
 };
 
-/// The config's root object, when its model_type is a Qwen3.5 text model, dense or sparse.
+/// The config's root object, when its model_type is a Qwen3.5 text model, dense or sparse, or MiniCPM-V 4.7 over a Qwen3.6 text tower.
 pub fn declared(a: std.mem.Allocator, bytes: []const u8) Error!std.json.ObjectMap {
     const doc = try objectOf(try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}));
     const kind = doc.get("model_type") orelse return error.UnsupportedModel;
-    if (kind != .string or !(eql(kind.string, "qwen3_5") or eql(kind.string, "qwen3_5_moe"))) return error.UnsupportedModel;
-    return doc;
+    if (kind != .string) return error.UnsupportedModel;
+    if (eql(kind.string, "qwen3_5") or eql(kind.string, "qwen3_5_moe")) return doc;
+    if (eql(kind.string, "minicpmv4_7") and wrapsQwen36(doc)) return doc;
+    return error.UnsupportedModel;
+}
+
+/// A MiniCPM-V 4.7 config whose language model is Qwen3.6's text tower (the vision tower and merger are not read).
+fn wrapsQwen36(doc: std.json.ObjectMap) bool {
+    const text = doc.get("text_config") orelse return false;
+    if (text != .object) return false;
+    const kind = text.object.get("model_type") orelse return false;
+    return kind == .string and eql(kind.string, "qwen3_5_moe_text");
 }
 
 /// The text tower's object: `text_config` when the config has one, else the root itself.
@@ -478,6 +488,18 @@ test "text_config parses into the Python Spec" {
     try std.testing.expectEqual(@as(usize, 1), s.mtp_layers);
     try std.testing.expect(!isTied(doc, tower));
     try std.testing.expect(s.full(3) and s.full(7) and !s.full(0) and !s.full(4));
+}
+
+test "MiniCPM-V 4.7 wraps Qwen3.6's text tower, other wrappers are refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const wrapped = try std.mem.replaceOwned(u8, arena.allocator(), sample_text, "\"model_type\": \"qwen3_5\", \"tie_word_embeddings\": false,", "\"model_type\": \"minicpmv4_7\", \"tie_word_embeddings\": false,");
+    const open = try std.mem.replaceOwned(u8, arena.allocator(), wrapped, "\"text_config\": {", "\"text_config\": {\"model_type\": \"qwen3_5_moe_text\", ");
+    const doc = try declared(arena.allocator(), open);
+    try std.testing.expectEqual(@as(usize, 4096), (try geometry(try textTower(doc), 4, 64)).hidden);
+    try std.testing.expectError(error.UnsupportedModel, declared(arena.allocator(), wrapped));
+    const other = try std.mem.replaceOwned(u8, arena.allocator(), open, "qwen3_5_moe_text", "llama");
+    try std.testing.expectError(error.UnsupportedModel, declared(arena.allocator(), other));
 }
 
 test "a top-level config, the partial rotary default and the MoE fields" {

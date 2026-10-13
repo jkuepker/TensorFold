@@ -107,6 +107,7 @@ pub const Files = struct {
         while (try it.next(io)) |e| {
             if (e.kind != .file and e.kind != .sym_link) continue;
             if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+            if (std.mem.startsWith(u8, e.name, "vision")) continue; // MiniCPM's image tower, not read here
             const path = try std.fs.path.join(a, &.{ dir, e.name });
             if (std.mem.startsWith(u8, e.name, "mtp")) try side.append(a, path);
             if (!containsLower(e.name, "mtp")) try model.append(a, path);

@@ -54,7 +54,7 @@ pub const Cuda = struct {
             .gpa = gpa,
             .e = e,
             .streams = streams,
-            .logits = try gpa.alloc(u16, c.vocab),
+            .logits = try gpa.alloc(u16, e.w.g.vocab),
             .cand_values = try gpa.alloc(f32, st.round_rows * st.max_candidates),
             .cand_ids = try gpa.alloc(i64, st.round_rows * st.max_candidates),
             .values = try gpa.alloc(f64, st.max_candidates),
@@ -189,13 +189,13 @@ pub const Cuda = struct {
         try f.picks(rows, out[0..rows]);
         var want: usize = 0;
         for (rules) |r| if (r) |rule| if (rule.temperature > 0 and rule.top_k != 0) {
-            want = @max(want, @min(c.vocab, @as(usize, rule.top_k) + 8));
+            want = @max(want, @min(x.e.w.g.vocab, @as(usize, rule.top_k) + 8));
         };
         if (want > st.max_candidates) want = 0; // past the GPU's candidates: whole rows below
         if (want > 0) {
             const t = f.ops.torch();
-            try t.toF32(s.logits, s.logits32, rows * c.vocab);
-            try t.topk(s.logits32, c.vocab, rows, want, s.cand_values, s.cand_ids, s.topk_scratch);
+            try t.toF32(s.logits, s.logits32, rows * x.e.w.g.vocab);
+            try t.topk(s.logits32, x.e.w.g.vocab, rows, want, s.cand_values, s.cand_ids, s.topk_scratch);
             try f.ops.download(std.mem.sliceAsBytes(x.cand_values[0 .. rows * want]), s.cand_values);
             try f.ops.download(std.mem.sliceAsBytes(x.cand_ids[0 .. rows * want]), s.cand_ids);
             try f.ops.s.synchronize();
@@ -210,7 +210,7 @@ pub const Cuda = struct {
                 o.* = @intCast(try lanes.sampling.choose(x.gpa, vals, @ptrCast(ids), pos, rule));
                 continue;
             }
-            try f.ops.download(std.mem.sliceAsBytes(x.logits), s.logits + r * c.vocab * 2);
+            try f.ops.download(std.mem.sliceAsBytes(x.logits), s.logits + r * x.e.w.g.vocab * 2);
             try f.ops.s.synchronize();
             o.* = try draw(x.gpa, x.logits, rule, pos);
         }
@@ -365,8 +365,8 @@ pub const Cuda = struct {
         return out[0];
     }
 
-    fn read(_: *anyopaque, handle: u64) !u32 {
-        if (handle >= c.vocab) return error.InvalidQwenToken;
+    fn read(p: *anyopaque, handle: u64) !u32 {
+        if (handle >= cast(p).e.w.g.vocab) return error.InvalidQwenToken;
         return @intCast(handle);
     }
 
