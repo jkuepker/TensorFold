@@ -27,6 +27,9 @@ const FakeDrafter = struct {
     widest_hold: usize = 0,
     rows: u64 = 0,
     first_start: ?u64 = null, // the last opened stream's first absorbed row
+    ends: bool = false, // chains end early by the drafter's own rule (and it says how many it kept)
+    short: u32 = 0, // chains that ended before the depth asked
+    deepest: u32 = 0, // the most drafts a hold was asked for
 
     const Lane = struct { history: std.ArrayList(u32) = .empty, held: std.ArrayList(u32) = .empty };
     const taps_ = [_]u32{ 44, 47, 49 };
@@ -44,7 +47,7 @@ const FakeDrafter = struct {
     }
 
     fn drafter(x: *FakeDrafter) dr.Drafter {
-        return .{ .ptr = x, .vtable = &.{ .taps = taps, .facts = facts, .open = open, .absorb = absorb, .hold = hold, .held = held, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .taps = taps, .facts = facts, .open = open, .absorb = absorb, .hold = hold, .held = held, .held_count = heldCount, .release = release } };
     }
 
     fn self(ptr: *anyopaque) *FakeDrafter {
@@ -101,14 +104,25 @@ const FakeDrafter = struct {
             try guess.appendSlice(gpa, l.history.items);
             try guess.append(gpa, it.pending);
             l.held.clearRetainingCapacity();
+            x.deepest = @max(x.deepest, it.depth);
             for (0..it.depth) |j| {
                 const at = it.position + j;
                 var t = fake.next(guess.items, it.stream.sampling, at);
                 if ((at *% 2654435761 + j) % 5 == 0) t = (t + 1) % fake.vocab;
                 try l.held.append(gpa, t);
                 try guess.append(gpa, t);
+                if (x.ends and j + 1 < it.depth and (at *% 7 + 1) % 4 == 0) { // a draft it was not sure of ends the chain
+                    x.short += 1;
+                    break;
+                }
             }
         }
+    }
+
+    fn heldCount(ptr: *anyopaque, s: *sm.Stream) ?u32 {
+        const x = self(ptr);
+        if (!x.ends) return null;
+        return @intCast((x.lanes.getPtr(s) orelse return null).held.items.len);
     }
 
     fn held(ptr: *anyopaque, streams: []const *sm.Stream, out: []const []u32) anyerror!void {
@@ -261,9 +275,13 @@ fn base() Model {
 }
 
 fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
+    return runWith(cases, mode, batched, false);
+}
+
+fn runWith(cases: []const Case, mode: Mode, batched: bool, ends: bool) !Out {
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
-    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched } };
+    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched, .stops = ends }, .ends = ends };
     var strict: Strict = .{ .inner = target.backend() };
     defer strict.deinit();
     var wrapped = try Drafted.init(gpa, strict.backend(), head.drafter());
@@ -331,6 +349,28 @@ test "an external drafter's rounds commit the one-token decode, greedy and sampl
         try std.testing.expect(drafted.drafted > 0 and drafted.accepted * 3 > drafted.drafted);
         try std.testing.expect(drafted.head.rows >= p1.len - 1 + drafted.tokens[0].len - 1);
     }
+}
+
+test "a drafter that ends its chains early is asked for the most, and its rounds verify what it kept" {
+    for ([_]?Sampling{ null, sampled }) |s| {
+        const drafted = try runWith(&.{.{ .prompt = &long, .sampling = s, .max_new = 120 }}, .wrapped, false, true);
+        defer freeOut(drafted);
+        const plain = try run(&.{.{ .prompt = &long, .sampling = s, .max_new = 120, .drafts = false }}, .plain, false);
+        defer freeOut(plain);
+        try std.testing.expectEqualSlices(u32, plain.tokens[0], drafted.tokens[0]);
+        try std.testing.expect(drafted.head.short > 0); // chains did end early, and the engine read the count back
+        try std.testing.expectEqual(@as(u32, 6), drafted.head.deepest); // the rule asked for the most every round
+        try std.testing.expect(drafted.drafted > 0 and drafted.accepted * 3 > drafted.drafted);
+    }
+    // two streams in a shared round: each keeps what it drafted, the answers are the lone ones
+    const together = try runWith(&.{ .{ .prompt = &p1 }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30 } }, .wrapped, true, true);
+    defer freeOut(together);
+    const one = try run(&.{.{ .prompt = &p1, .drafts = false }}, .plain, false);
+    defer freeOut(one);
+    const two = try run(&.{.{ .prompt = &p2, .sampling = sampled, .max_new = 30, .drafts = false }}, .plain, false);
+    defer freeOut(two);
+    try std.testing.expectEqualSlices(u32, one.tokens[0], together.tokens[0]);
+    try std.testing.expectEqualSlices(u32, two.tokens[0], together.tokens[1]);
 }
 
 test "drafts off on the wrapped backend never reach the drafter" {

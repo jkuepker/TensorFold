@@ -189,3 +189,32 @@ extern "C" __global__ void __launch_bounds__(128) tf_qwen_combine_f32(const floa
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_combine_bf16(const __nv_bfloat16* Y, const float* W, __nv_bfloat16* OUT, int S, int D) {
     combine<__nv_bfloat16>(Y, W, OUT, S, D);
 }
+
+// The MTP head's confidence: a bf16 logits row's max and sum of exp(x - max), torch.softmax's float32 normalizer (fixed tree).
+extern "C" __global__ void __launch_bounds__(1024) tf_qwen_row_stats(const __nv_bfloat16* __restrict__ L, int N, float* __restrict__ OUT) {
+    __shared__ float part[32];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    float m = -INFINITY;
+    for (int i = t; i < N; i += 1024) m = fmaxf(m, __bfloat162float(L[i]));
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFFu, m, off));
+    if (lane == 0) part[warp] = m;
+    __syncthreads();
+    m = part[lane];
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFFu, m, off));
+    __syncthreads();
+    float s = 0.0f;
+    for (int i = t; i < N; i += 1024) s += expf(__bfloat162float(L[i]) - m);
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) s += __shfl_xor_sync(0xFFFFFFFFu, s, off);
+    if (lane == 0) part[warp] = s;
+    __syncthreads();
+    s = part[lane];
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) s += __shfl_xor_sync(0xFFFFFFFFu, s, off);
+    if (t == 0) {
+        OUT[0] = m;
+        OUT[1] = s;
+    }
+}

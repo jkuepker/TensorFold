@@ -59,6 +59,7 @@ pub const Rule = struct {
     node_probabilities: bool,
     batch_rows: u32,
     batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
+    chain_stops: bool = false, // the head ends its own chain (by confidence): a lone stream asks for the most drafts
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
     greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
@@ -141,6 +142,7 @@ pub const Rule = struct {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         if (most <= 0) return 0;
         const p = try r.rates(who);
+        if (r.chain_stops) return most;
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
             return @max(1, @min(most, want));
@@ -322,6 +324,25 @@ test "depth picks the most tokens a ms and probes deeper" {
     defer if (st) |*s| s.deinit(gpa);
     const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
     try std.testing.expectEqual(@as(i64, 3), try rule.depth(who));
+}
+
+test "a head that ends its own chains is asked for the most drafts the room allows" {
+    const gpa = std.testing.allocator;
+    var fc: Table = .{};
+    defer fc.deinit(gpa);
+    for (1..5) |w| try fc.put(gpa, @intCast(w), 5.0 + 4.0 * @as(f64, @floatFromInt(w))); // costly rows: the cost rule would draft 1
+    const shared: Table = .{};
+    var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.3, 0.3, 0.3 }, .most_drafts = 3, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 2.0, .plain_guard = true, .node_probabilities = false, .batch_rows = 8, .chain_stops = true };
+    defer rule.deinit();
+    var st: ?State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    var who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try std.testing.expectEqual(@as(i64, 3), try rule.depth(who));
+    who.draft_room = 3; // two rows of room past the pending one
+    try std.testing.expectEqual(@as(i64, 2), try rule.depth(who));
+    rule.chain_stops = false;
+    who.draft_room = 100;
+    try std.testing.expect(try rule.depth(who) < 3);
 }
 
 test "a shared round's drafts come out the same whichever depths its overhead was measured at" {

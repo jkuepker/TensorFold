@@ -4,12 +4,14 @@ const Allocator = std.mem.Allocator;
 const be = @import("backend.zig");
 const Model = @import("config.zig").Model;
 const Stream = @import("stream.zig").Stream;
+const Held = @import("stream.zig").Held;
 const dr = @import("drafter.zig");
 
 /// What the wrapper knows of a drafting stream.
 const Lane = struct {
     rows: bool = false, // the drafter has absorbed the row before the next draft (it can draft)
     filler: u32 = 0, // drafts the next verify takes as fillers instead (a prompt restored whole: no row to draft from)
+    holding: bool = false, // the drafter holds this stream's drafts from the last request (so it knows their count)
 };
 
 pub const Drafted = struct {
@@ -44,7 +46,7 @@ pub const Drafted = struct {
     }
 
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .tree = tree, .release = release } };
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
@@ -60,6 +62,7 @@ pub const Drafted = struct {
         m.plain_guard = d.plain_guard;
         m.draft_streams = d.batched;
         m.draft_probabilities = false;
+        m.draft_stops = d.stops;
         m.head_trees = false;
         return m;
     }
@@ -160,6 +163,7 @@ pub const Drafted = struct {
             if (r.lanes != null) return error.TreesNotBuilt;
             const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
             lane.filler = 0; // a new request supersedes fillers a copy round left unused
+            lane.holding = false;
             var pending: u32 = undefined;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
@@ -188,9 +192,19 @@ pub const Drafted = struct {
                 continue;
             }
             try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth });
+            lane.holding = true;
         }
         if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
+    }
+
+    /// How many drafts a drafter with early-ending chains kept (tokens stay with it: verify reads them); null: as asked.
+    fn tree(ptr: *anyopaque, s: *Stream, _: Allocator) anyerror!?Held {
+        const x = self(ptr);
+        const lane = x.lanes.getPtr(s) orelse return null;
+        if (!lane.holding) return null;
+        const count = x.drafter.heldCount(s) orelse return null;
+        return .{ .count = count };
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {

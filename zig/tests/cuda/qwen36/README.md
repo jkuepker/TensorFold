@@ -23,7 +23,8 @@ reply ids (b) and the tool calls (c). Stdlib Python only.
 ## MTP drafts
 
 The checkpoint's MTP layer drafts through the lane core (`families/qwen3_5/cuda/mtp*.zig`): the kept rows' final normed
-states are absorbed into the head, which then chains up to three drafts; the target verifies them in one pass, the
+states are absorbed into the head, which then chains up to three drafts, ending a chain after a draft it gives under 0.3
+probability (the Python engine's rule); the target verifies them in one pass, the
 DeltaNet state replays to the accepted path, and every row is drawn by the target's keyed rule, so a drafted reply equals
 the `"draft": false` one, sampled requests included. `"draft": false` on a request turns its drafts off.
 
