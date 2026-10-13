@@ -73,3 +73,17 @@ keyed draws, so a reply equals the same request alone. Prompts still run one at 
 off, thinking off): six chat requests with their prompt ids, greedy reply ids and parsed tool calls. The native server
 (`minicpmv4_7`) answers it token for token, drafted and with `--draft-off`, alone and with two clients at once:
 `serve_check.py check URL ../minicpm/fixture.json [--draft-off]`. It uses the same captured kernel set as Qwen3.6.
+
+## Programmatic dependent launch
+
+Each plain launch on the stream leaves the GPU about 2 us idle before the next kernel starts; a kernel launched with
+the PDL attribute is staged while the one before it still runs, and the gap closes. The native kernels that follow
+another grid (`qwen_route.cu`'s three, `gdn.cu`'s tree and replay) begin with `griddepcontrol.wait` and are launched
+that way on GB10. The captured Triton kernels have no wait, so `aot_pdl.py --set <kernel set> --cache <Triton cache>
+[--cache ...] --ptxas <ptxas> --out <new set>` rebuilds a set: it finds each kernel's PTX by hash in the Triton
+caches, builds it with Triton's own ptxas command and requires the captured cubin back byte for byte (use the ptxas of
+the container that ran the capture; run the script inside it), then builds it again with `griddepcontrol.wait` as the
+first instruction and marks the kernel `pdl` in `aot.json`. The loader launches `pdl` kernels with the attribute. The
+rebuilt SASS has the same instructions plus the wait (`ACQBULK`, ahead of every memory access); on some kernels ptxas
+also renames registers or reorders independent instructions around it, so the checks above must pass on the new set,
+as they do on the captured one. Point `TENSORFOLD_CUDA_KERNELS` at it.

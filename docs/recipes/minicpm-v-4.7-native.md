@@ -57,6 +57,8 @@ rounds' variants. MiniCPM uses that set unchanged.
 
 - A set from the layer capture alone serves `--no-drafts --parallel 1`. With drafts or `--parallel 2` the server stops at
 load on a launch with no captured variant (`MissingTritonVariant`).
+- `aot_pdl.py` (same README) rebuilds a set so its kernels launch with programmatic dependent launch: the idle gap
+between kernels closes, about +3% more decode speed on the GB10 at the same bytes. Optional; the unrebuilt set works.
 - TODO: own glue kernels, which would remove the capture step.
 
 ## Serve

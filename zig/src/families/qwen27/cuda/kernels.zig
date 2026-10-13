@@ -161,7 +161,12 @@ pub const Ops = struct {
     s: cuda.Stream,
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared }, o.s, args);
+        try o.goWith(f, grid, block, shared, args, false);
+    }
+
+    /// `pdl` only for a kernel that begins with the grid wait (pdl.cuh), and only on a GPU the decode kernels run PDL on.
+    fn goWith(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args, pdl: bool) !void {
+        try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared, .pdl = pdl and o.k.gb10 }, o.s, args);
     }
 
     /// qmm.matmul on sm_12x: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's bits.
@@ -271,7 +276,7 @@ pub const Ops = struct {
         a.add(@as(u64, 0));
         a.add(h.dv % variant.r == 0 and v % (2 * @as(u64, @min(variant.r, 8))) == 0);
         const shared = 16 * @as(usize, variant.warps) * variant.slots * variant.r * 32 + (if (variant.chain) 0 else 4 * 3 * most);
-        try o.go(o.k.trees[index], .{ (h.dv + variant.r * variant.warps - 1) / (variant.r * variant.warps), h.hv, streams }, 32 * variant.warps, @intCast(shared), &a);
+        try o.goWith(o.k.trees[index], .{ (h.dv + variant.r * variant.warps - 1) / (variant.r * variant.warps), h.hv, streams }, 32 * variant.warps, @intCast(shared), &a, true);
     }
 
     /// gdn.replay in place: each stream's accepted rows stepped into the states the table names.
@@ -285,7 +290,7 @@ pub const Ops = struct {
         a.add(int(count_stride));
         a.add(@as(u64, 0));
         for ([_]usize{ h.hk, h.hv, h.dv }) |x| a.add(int(x));
-        try o.go(o.k.replay, .{ (h.dv + 31) / 32, h.hv, layers * streams }, 128, 0, &a);
+        try o.goWith(o.k.replay, .{ (h.dv + 31) / 32, h.hv, layers * streams }, 128, 0, &a, true);
     }
 
     /// gdn.chain: a prompt chunk's rows from `state` (read only) to `last`, chunk-invariant bits.
