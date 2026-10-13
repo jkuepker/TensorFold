@@ -19,3 +19,21 @@ answers like the Python 0.6.6 engine run serial. `serve_check.py record URL FIXT
 ids (/tokenize), greedy reply ids (`return_token_ids`, temperature 0, 256 tokens, thinking off) and parsed tool calls;
 `serve_check.py check URL FIXTURE` reruns the fixture against any server and compares the chat template's ids (a), the
 reply ids (b) and the tool calls (c). Stdlib Python only.
+
+## MTP drafts
+
+The checkpoint's MTP layer drafts through the lane core (`families/qwen3_5/cuda/mtp*.zig`): the kept rows' final normed
+states are absorbed into the head, which then chains up to three drafts; the target verifies them in one pass, the
+DeltaNet state replays to the accepted path, and every row is drawn by the target's keyed rule, so a drafted reply equals
+the `"draft": false` one, sampled requests included. `"draft": false` on a request turns its drafts off.
+
+1. The Python engine's head calls and drafted rounds, in the container as above: `capture.py --mtp --model <checkpoint> --out <dumps>`
+   (`capture_mtp.py` is its body; `mtp_weights.txt` holds the head's tensor digests, `<prompt>/greedy/cNNN` each call's
+   states, norms, normed rows and draft logits, `tokens.json` the drafted and serial replies, greedy and one seeded sampled
+   request each). It also sweeps every verify width, so the Triton set packed from its launches covers drafted rounds.
+2. `tf-qwen35-upload MODEL --mtp --digests` prints the head's tensors as `mtp_weights.txt` holds them.
+3. `tf-cuda-test qwen36-mtp MODEL <kernel set> <dumps> [PROMPTS]` replays the head calls in order over its own cache:
+   every norm, normed row and draft logit byte for byte.
+4. `mtp_check.py URL FIXTURE DUMPS` against a native server with drafts on: the fixture's chat requests and the dumps'
+   four prompts (greedy, and the seeded sampled request) drafted, with `"draft": false`, and the Python engine's serial
+   reply must all match, with acceptance beside the Python engine's.

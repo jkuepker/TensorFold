@@ -8,6 +8,7 @@ pub const moe = @import("cuda/moe.zig");
 pub const draft_ids = @import("cuda/draft_ids.zig");
 pub const mtp_weights = @import("cuda/mtp_weights.zig");
 pub const mtp = @import("cuda/mtp.zig");
+pub const mtp_drafter = @import("cuda/mtp_drafter.zig");
 pub const native = @import("cuda/native.zig");
 
 test {
@@ -19,5 +20,6 @@ test {
     _ = draft_ids;
     _ = mtp_weights;
     _ = mtp;
+    _ = mtp_drafter;
     _ = native;
 }

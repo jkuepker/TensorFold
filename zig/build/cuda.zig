@@ -97,7 +97,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     qwen27.addImport("core", core);
     qwen27.addImport("lanes", lanes);
     qwen27.addImport("nemotron", nemotron); // the checkpoint Source and torch ops the CUDA families share
-    const qwen35 = qwen35Cuda(b, target, optimize, cuda, core, qwen27);
+    const qwen35 = qwen35Cuda(b, target, optimize, cuda, core, lanes, qwen27);
     return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen27 = qwen27, .qwen35 = qwen35, .tokenizer = tokenizer, .heat = heat };
 }
 
@@ -158,10 +158,11 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 }
 
 /// Qwen3.5-family models on the GPU (zig/src/families/qwen3_5/cuda.zig): the MoE checkpoint's weights, router and experts.
-fn qwen35Cuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Module {
+fn qwen35Cuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Module {
     const gpu = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     gpu.addImport("cuda", cuda);
     gpu.addImport("core", core);
+    gpu.addImport("lanes", lanes);
     gpu.addImport("qwen27", qwen27);
     gpu.addImport("qwen35", qwen35Loader(b, target, optimize, core));
     return gpu;
