@@ -62,13 +62,18 @@ docker exec tensorfold pip install --no-deps "git+https://github.com/jkuepker/Te
 ```
 
 Run the commands below with `docker exec -it tensorfold`; the container sees the checkpoint as `/models/...`. The
-first start builds the CUDA kernels (about 30 s).
+first start builds the CUDA kernels: about 40 s before the server reports it is serving, and about a minute more on
+the first request, which builds the rest. Later starts take under 10 s.
 
 ## Serve
 
 ```bash
 docker exec -it tensorfold tensorfold serve /models/MiniCPM-V-4.7-35B-A3B-MLX-4bit --name minicpm --context 49152 --vision
 ```
+
+Thinking is on by default (the chat template's default): replies reason before answering, and `max_tokens` counts
+both. Serve with `--no-thinking`, or send `chat_template_kwargs: {"enable_thinking": false}` per request, to turn it
+off; the measurements below ran with it off.
 
 Without `--vision` the tower is not loaded and its tensors are left out of the memory estimate. Text requests are
 served exactly as on Qwen3.6 MoE, prompt states kept at message starts. `--no-drafts` or `"draft": false` decodes
