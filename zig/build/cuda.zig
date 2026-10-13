@@ -34,6 +34,7 @@ const kernels = [_]Kernel{
     .{ .name = "train", .flags = &.{"-O3"} }, // ours: Sliding Weights' learning step (train.metal's kernels)
     .{ .name = "qwen_ops", .flags = &.{"-O3"} }, // ours: the 27B's batched state copies, taps, drafter norms and rotary
     .{ .name = "qwen_route", .flags = &.{"-O3"} }, // ours: Qwen3.6's router logits, softmax top-k and slot-order combine (Triton's bits)
+    .{ .name = "qwen_attention", .flags = &.{ "-O3", "--fmad=false" } }, // ours: Qwen3.6 tree attention (attention.py's _shared, _tail, _merge; Triton's bits)
     .{ .name = "nemotron_norms", .flags = glue }, // ours, each with a host reference (glue_ref.zig): Nemotron's glue
     .{ .name = "nemotron_route", .flags = glue },
     .{ .name = "nemotron_mamba", .flags = glue },
