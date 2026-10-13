@@ -15,6 +15,7 @@ pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
 // a row's bits ignore the cuts, a kept row costs no call: states keep at any row; the head reads one token on
 pub const snap_rules = .{ .lookahead = 1, .min_prompt = 0 };
+pub const snap_warm = true; // a reply's end is prefilled when the engine is quiet, for the next turn
 pub const snap_ready = reuse.ready; // the spare Mamba buffers it sets aside come out of the cache's budget
 const core = @import("core");
 
@@ -25,12 +26,18 @@ pub const model_type = "nemotron_h";
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
-pub const prompt_rows: u32 = state.prefill_rows;
+pub const prompt_rows: u32 = state.pass_rows;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
 
+/// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
+pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
+
+/// Nanoseconds a reply's background pass waits for the next request first: its first chunk holds the GPU.
+pub const warm_quiet: u64 = 150 * std.time.ns_per_ms;
+
 /// A lone drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
-pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
+pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -103,9 +110,9 @@ pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     return .{ .e = own.e, .dir = dir, .living = &own.living };
 }
 
-fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool {
+fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool {
     const own: *Owned = @ptrCast(@alignCast(p));
-    return lone.run(own.gpa, &own.lanes, s, .{ .ctx = hooks, .committed = committed, .yield = yield });
+    return lone.run(own.gpa, &own.lanes, s, .{ .ctx = hooks, .committed = committed, .yield = yield, .resumed = resumed });
 }
 
 /// A request this engine refuses, in words; null: none of its own.

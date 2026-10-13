@@ -18,7 +18,7 @@ pub const prompt_rows: u32 = engine.prompt_rows;
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, drafter: ?[]const u8 = null };
 
 /// A lone drafted stream's own driver (none here: one stream decodes in the lane core too, as under --parallel).
-pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
+pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
