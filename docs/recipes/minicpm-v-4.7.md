@@ -15,7 +15,6 @@ conversion takes about a minute; it has not been tried on Linux. Then copy the 2
 ```bash
 hf download openbmb/MiniCPM-V-4.7-35B-A3B --local-dir ~/models/minicpm-v47-bf16
 python tools/minicpmv47_to_mlx.py --src ~/models/minicpm-v47-bf16 --out ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit
-python tools/minicpmv47_mlx_check.py inventory --out ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit   # optional checks
 rsync -a ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit spark:models/                                   # to the DGX Spark
 ```
 
@@ -25,7 +24,10 @@ of 64, the router and shared-expert gate at 8 bits. The text shards are byte for
 `mlx-community/Qwen3.6-35B-A3B-4bit` apart from the vocabulary. The vision tower (`model.vision_tower.*`, 453
 tensors) and merger (`model.merger.*`, 6) stay BF16 in `vision-bf16.safetensors`, `config.json` stays MiniCPM's own
 (top-level `model_type: minicpmv4_7`) plus the `quantization` block, and the tokenizer, chat template and processor
-files are copied. About 20 GB.
+files are copied. About 20 GB. A conversion from a fresh download of the hub repo gave byte-identical weight files to the
+checkpoint measured below. The hub's `processor_config.json` is empty, so TensorFold slices images with MiniCPM's
+defaults (448-pixel slices, up to 9 of them, 16x downsampling). `tools/minicpmv47_mlx_check.py` compares the result's
+tensor inventory with `mlx-community/Qwen3.6-35B-A3B-4bit` (see its docstring for the reference files it needs).
 
 ### Drafts: Qwen3.6's MTP layer
 
