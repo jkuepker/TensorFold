@@ -148,7 +148,20 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     qwen_cli.addImport("cuda", cuda);
     qwen_cli.addImport("qwen27", mods.qwen27);
     b.installArtifact(b.addExecutable(.{ .name = "tf-qwen27-cuda", .root_module = qwen_cli }));
+    b.installArtifact(qwen35Index(b, target, optimize, mods.core));
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.tokenizer, build_options, true).root_module.strip = strip;
+}
+
+/// The Qwen3.5 / 3.6 host loader (zig/src/families/qwen3_5/loader.zig) over the core's quant formats and safetensors.
+fn qwen35Loader(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+}
+
+/// `tf-qwen35-index DIR`: a checkpoint's config and tensor index through the host loader.
+fn qwen35Index(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Step.Compile {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen35_index.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("qwen35", qwen35Loader(b, target, optimize, core));
+    return b.addExecutable(.{ .name = "tf-qwen35-index", .root_module = m });
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
@@ -213,6 +226,12 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     step.dependOn(&server_test.step);
     b.step("test-server-cpu", "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU").dependOn(&server_test.step);
+    // the loader's tests; TF_QWEN_DIR (a real checkpoint) is not a cached input
+    const loader_tests = b.addRunArtifact(b.addTest(.{ .root_module = qwen35Loader(b, host, .debug, mods.core) }));
+    loader_tests.has_side_effects = true;
+    step.dependOn(&loader_tests.step);
+    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader_tests.step);
+    step.dependOn(&qwen35Index(b, host, .debug, mods.core).step);
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.heat, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);
