@@ -5,6 +5,8 @@ The checkpoint must contain its vision tower, tokenizer, processor files and vis
 Video, audio and image generation are not supported by this adapter.
 Qwen3.8 Flash Next supports images on one CUDA GPU with `--parallel` of at least two; see the
 [Flash Next image recipe](recipes/flash-next-vision.md), including offline reconstruction of an EXL3 vision sidecar.
+MiniCPM-V 4.7 supports images on one CUDA GPU, one stream (`--parallel` above 1 is refused with `--vision`), with its
+own sliced tower and canvas positions; see the [MiniCPM-V 4.7 recipe](recipes/minicpm-v-4.7.md).
 
 ## Start a server
 
