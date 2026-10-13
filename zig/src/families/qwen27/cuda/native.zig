@@ -34,6 +34,8 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null,
+    /// Streams the engine serves at most (the lane core admits fewer when asked for more).
+    max_lanes: u32 = std.math.maxInt(u32),
 };
 
 const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, lanes: Lanes, draft: ?*dr.DFlash2 = null };

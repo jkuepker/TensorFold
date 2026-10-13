@@ -196,7 +196,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .return_ids = if (input.fields.get("return_token_ids")) |v| v.truthy() else false, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -270,6 +270,7 @@ const Generation = struct {
     thinking: bool,
     stops: reply_text.Stops,
     ignore_eos: bool,
+    return_ids: bool = false, // return_token_ids: the reply's ids in the runtime block, as the Python server's
     max_tokens: u32,
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
@@ -484,6 +485,11 @@ const Generation = struct {
         try runtime.put(a, "drafts", .{ .bool = drafts });
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
+        if (g.return_ids) {
+            const reply_ids = try a.alloc(Value, g.collected.items.len);
+            for (g.collected.items, reply_ids) |t, *slot| slot.* = try json.intValue(a, t);
+            try runtime.put(a, "token_ids", .{ .array = reply_ids });
+        }
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.loop_period) |period| {
             const loop_field = try json.newObject(a);

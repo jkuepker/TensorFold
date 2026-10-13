@@ -79,7 +79,7 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return cuda;
 }
 
-fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen27: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module } {
+fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen27: *std.Build.Module, qwen35: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module } {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("tokenizer", tokenizer);
@@ -97,7 +97,8 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     qwen27.addImport("core", core);
     qwen27.addImport("lanes", lanes);
     qwen27.addImport("nemotron", nemotron); // the checkpoint Source and torch ops the CUDA families share
-    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen27 = qwen27, .tokenizer = tokenizer, .heat = heat };
+    const qwen35 = qwen35Cuda(b, target, optimize, cuda, core, qwen27);
+    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen27 = qwen27, .qwen35 = qwen35, .tokenizer = tokenizer, .heat = heat };
 }
 
 /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
@@ -129,7 +130,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     cli.addImport("core", mods.core);
     cli.addImport("lanes", mods.lanes);
     cli.addImport("nemotron", mods.nemotron);
-    const native = engines(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.qwen27);
+    const native = engines(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.qwen27, mods.qwen35);
     cli.addOptions("build_options", build_options);
     cli.addImport("checkpoint_cli", checkpointCli(b, target, optimize, strip, native.engines, mods.core));
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
@@ -138,7 +139,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
     runner.addImport("qwen27", mods.qwen27);
-    runner.addImport("qwen35_cuda", qwen35Cuda(b, target, optimize, cuda, mods.core, mods.qwen27));
+    runner.addImport("qwen35_cuda", mods.qwen35);
     const exlr8 = exlr8_build.coreAlias(b, target, optimize, mods.core);
     runner.addImport("exlr8", exlr8);
     const exlr8_tests = exlr8_build.testModules(b, target, optimize, exlr8);
@@ -152,8 +153,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     qwen_cli.addImport("qwen27", mods.qwen27);
     b.installArtifact(b.addExecutable(.{ .name = "tf-qwen27-cuda", .root_module = qwen_cli }));
     b.installArtifact(qwen35Index(b, target, optimize, mods.core));
-    b.installArtifact(qwen35Upload(b, target, optimize, cuda, mods.core, mods.qwen27));
-    nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.tokenizer, build_options, true).root_module.strip = strip;
+    b.installArtifact(qwen35Upload(b, target, optimize, cuda, mods.qwen35));
+    nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.qwen35, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
 /// Qwen3.5-family models on the GPU (zig/src/families/qwen3_5/cuda.zig): the MoE checkpoint's weights, router and experts.
@@ -179,22 +180,22 @@ fn qwen35Index(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 }
 
 /// `tf-qwen35-upload DIR`: a Qwen3.5-family MoE checkpoint on the GPU (qwen3_5/cuda.zig), its bytes reported.
-fn qwen35Upload(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Step.Compile {
+fn qwen35Upload(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, qwen35: *std.Build.Module) *std.Build.Step.Compile {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen35_upload.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
-    m.addImport("qwen35_cuda", qwen35Cuda(b, target, optimize, cuda, core, qwen27));
+    m.addImport("qwen35_cuda", qwen35);
     return b.addExecutable(.{ .name = "tf-qwen35-upload", .root_module = m });
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
-fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen27: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
+fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen27: *std.Build.Module, qwen35: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron }, .{ .name = "qwen27", .module = qwen27 } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron }, .{ .name = "qwen27", .module = qwen27 }, .{ .name = "qwen35_cuda", .module = qwen35 } },
     });
     return .{ .api = api, .engines = mod };
 }
@@ -205,8 +206,8 @@ fn checkpointCli(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// `zig build native`: tensorfold-native with the CUDA engines into zig-out/native/bin, as the Metal build makes it.
-fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen27: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool) *std.Build.Step.Compile {
-    const m = engines(b, target, optimize, cuda, lanes, nemotron, qwen27);
+fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen27: *std.Build.Module, qwen35: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool) *std.Build.Step.Compile {
+    const m = engines(b, target, optimize, cuda, lanes, nemotron, qwen27, qwen35);
     // the HTTP side keeps its safety checks; the engine below it runs at `optimize` (the tokenizer is the family's)
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
@@ -234,7 +235,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
     const mods = family(b, host, .debug, cuda, draft_ids);
-    const native_modules = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron, mods.qwen27);
+    const native_modules = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron, mods.qwen27, mods.qwen35);
     const native = native_modules.engines;
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
@@ -254,7 +255,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&loader_tests.step);
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader_tests.step);
     step.dependOn(&qwen35Index(b, host, .debug, mods.core).step);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen35Cuda(b, host, .debug, cuda, mods.core, mods.qwen27) })).step);
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35 })).step);
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.heat, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);
@@ -291,7 +292,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     };
     const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
     const mods = family(b, target, .fast, cuda, draft_ids);
-    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.tokenizer, build_options, false);
+    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.qwen35, mods.tokenizer, build_options, false);
 }
 
 /// SASS targets every release fatbin holds: Ampere (sm_86), RTX 50 and RTX PRO Blackwell (sm_120), GB10 (sm_121).

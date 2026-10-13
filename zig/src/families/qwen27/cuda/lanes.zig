@@ -44,6 +44,7 @@ pub const Cuda = struct {
     drafting: std.AutoHashMapUnmanaged(*lanes.Stream, *drafts.Stream) = .empty,
     costs: [calibration.len + 1]lanes.config.Cost = undefined, // the forward's ms by a round's rows (calibrate)
     cost_count: usize = 0,
+    shared_prompts: bool = true, // false: every prompt runs alone through prefill, the pass the Qwen3.6 MoE is checked on
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: u32) !Cuda {
         return .{
@@ -129,8 +130,15 @@ pub const Cuda = struct {
         x.cost_count = n;
     }
 
+    const table: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany };
+    const table_alone: be.Backend.VTable = blk: {
+        var t = table;
+        t.prefill_many = null;
+        break :blk t;
+    };
+
     pub fn backend(x: *Cuda) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany } };
+        return .{ .ptr = x, .vtable = if (x.shared_prompts) &table else &table_alone };
     }
 
     /// The stream's drafting (its DFlash2 context and copy index), made on first use.

@@ -13,3 +13,9 @@ state a prefill commits (the layout is in its docstring). Two runs of it hash eq
 The test runs the whole 40-layer engine (prefill, one-row steps from an empty state, steps after the prefill)
 and compares at every norm and every MoE layer, so the first differing op is the first line it prints.
 `--teacher` puts the dump's bytes in place of each compared value, so one layer's fault does not flow on.
+
+Served: `tensorfold-native serve MODEL --no-drafts --parallel 1` (with `TENSORFOLD_CUDA_KERNELS` set to the captured kernel set)
+answers like the Python 0.6.6 engine run serial. `serve_check.py record URL FIXTURE` records a Python server's prompt
+ids (/tokenize), greedy reply ids (`return_token_ids`, temperature 0, 256 tokens, thinking off) and parsed tool calls;
+`serve_check.py check URL FIXTURE` reruns the fixture against any server and compares the chat template's ids (a), the
+reply ids (b) and the tool calls (c). Stdlib Python only.

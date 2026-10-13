@@ -5,6 +5,7 @@ pub const experts = @import("cuda/experts.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const router = @import("cuda/router.zig");
 pub const moe = @import("cuda/moe.zig");
+pub const native = @import("cuda/native.zig");
 
 test {
     _ = pack;
@@ -12,4 +13,5 @@ test {
     _ = weights;
     _ = router;
     _ = moe;
+    _ = native;
 }

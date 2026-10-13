@@ -21,6 +21,9 @@ pub fn chunkBounds(start: usize, end: usize, size: usize, j: usize) [2]usize {
 
 pub const Options = struct { context: usize };
 
+/// A family's own weights and layer pieces beside this engine's: freed in place of `w` before the kernels they read.
+pub const Owner = struct { ptr: *anyopaque, deinit: *const fn (*anyopaque) void };
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     ctx: *const cuda.Context,
@@ -29,6 +32,8 @@ pub const Engine = struct {
     w: wts.Weights,
     scratch: st.Scratch,
     context: usize,
+    hooks: ?Forward.Hooks = null, // a family's MLP in place of the dense one (the Qwen3.6 MoE)
+    owner: ?Owner = null, // set when a family loaded `w` and owns it
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !*Engine {
         const cfg = try c.Config.read(gpa, io, dir);
@@ -52,7 +57,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.scratch.deinit();
-        e.w.deinit();
+        if (e.owner) |o| o.deinit(o.ptr) else e.w.deinit();
         e.k.deinit();
         e.s.deinit();
         e.gpa.destroy(e);
@@ -63,7 +68,7 @@ pub const Engine = struct {
     }
 
     pub fn forward(e: *Engine) Forward {
-        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .set = &e.k.triton, .s = e.s }, .s = &e.scratch };
+        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .set = &e.k.triton, .s = e.s }, .s = &e.scratch, .hooks = e.hooks };
     }
 
     /// A stream's state for `capacity` positions (its caches, recurrences and conv windows), empty.

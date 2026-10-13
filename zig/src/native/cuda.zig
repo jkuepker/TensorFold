@@ -5,12 +5,13 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const qwen27 = @import("qwen27");
+const qwen35 = @import("qwen35_cuda");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, qwen27.native };
+const registry = .{ nemotron.native, qwen27.native, qwen35.native };
 
 /// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
 const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
@@ -356,6 +357,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (@hasDecl(F, "refusal")) if (F.refusal(o.drafts, o.lanes, o.lanes_fixed)) |why| {
+        problem.* = why;
+        return null;
+    };
     const native = modelContext(a, io, o.dir);
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
@@ -437,7 +442,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
     const room = after.room(model) -| loaded.learn_bytes;
     const free = loaded.free_streams;
-    const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
+    const asked = if (@hasField(@TypeOf(loaded), "max_lanes")) @min(o.lanes, loaded.max_lanes) else o.lanes;
+    const streams = budget.admit(room, loaded.stream_bytes, free, asked, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
             error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, or free device memory", .{ window, toGib(loaded.stream_bytes), toGib(room), toGib(model), toGib(after.reserve) }),
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(loaded.stream_bytes * (o.lanes -| free)), window, toGib(room), free + room / loaded.stream_bytes }),
@@ -513,6 +519,9 @@ test "chip classes name the compute capability as gate entries do" {
 test "every registered family is listed for capabilities" {
     try std.testing.expectEqual(@as(usize, registry.len), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
+    var qwen36 = false;
+    for (families) |f| qwen36 = qwen36 or std.mem.eql(u8, f.model_type, "qwen3_5_moe");
+    try std.testing.expect(qwen36);
 }
 
 test "variables: unset or empty means the default, anything but a whole number is refused" {
