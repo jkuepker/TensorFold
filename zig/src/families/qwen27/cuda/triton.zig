@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const aot = cuda.aot;
+const prep = @import("prep_native.zig");
 
 const p = aot.ptr;
 
@@ -41,6 +42,8 @@ pub const Attn = struct { heads: usize, kv_heads: usize, dim: usize, half: usize
 pub const Tri = struct {
     set: *const aot.Set,
     s: cuda.Stream,
+    /// qwen_prep.cu's kernels, where `prep.exact` says they are byte-equal to the captured launches (null: replay).
+    native: ?*const prep.Native = null,
 
     fn run(t: Tri, name: []const u8, grid: [3]u32, args: []const aot.Arg, consts: []const aot.Const) !void {
         try t.set.run(t.s, name, grid, args, consts);
@@ -58,6 +61,7 @@ pub const Tri = struct {
 
     /// glue.gdn_pre: conv over each row's window of [state; qkv], q/k norms, g and beta; `sid`: several streams.
     pub fn gdnPre(t: Tri, qkv: u64, cs: u64, cw: u64, win: u64, sid: ?u64, a: u64, b: u64, alog: u64, dtb: u64, q: u64, k: u64, v: u64, g: u64, beta: u64, rows: usize, m: Gdn) !void {
+        if (t.native) |n| if (prep.exact.gdn_pre and prep.gdnFits(m.kh, m.vh, m.dk, m.c)) return n.gdnPre(t.s, qkv, cs, cw, win, sid, a, b, alog, dtb, q, k, v, g, beta, rows, m.kh, m.vh, m.dk, m.c, m.keep);
         try t.run("_gdn_pre", .{ u(rows), u(2 * m.kh + m.vh), 1 }, &.{
             p("QKV", "*bf16", qkv), p("CS", "*bf16", cs), p("CW", "*bf16", cw), p("WIN", "*i32", win), p("A", "*bf16", a), p("B", "*bf16", b),       p("ALOG", "*fp32", alog),
             p("DTB", "*fp32", dtb), p("Q", "*bf16", q),   p("K", "*bf16", k),   p("V", "*bf16", v),    p("G", "*fp32", g), p("BETA", "*fp32", beta), p("SID", "*i32", sid orelse win),
@@ -76,6 +80,7 @@ pub const Tri = struct {
 
     /// glue.attn_prep: q (from the [q | gate] rows) and k normed, then rotated at each row's position.
     pub fn attnPrep(t: Tri, qg: u64, kv: u64, qn: u64, kn: u64, pos: u64, inv: u64, qout: u64, kout: u64, rows: usize, a: Attn, eps: f32) !void {
+        if (t.native) |n| if (prep.exact.attn_prep and prep.attnFits(a.dim, a.half)) return n.attnPrep(t.s, qg, kv, qn, kn, pos, inv, qout, kout, rows, a.heads, a.kv_heads, a.dim, a.half, eps);
         try t.run("_attn_prep", .{ u(rows), u(a.heads + a.kv_heads), 1 }, &.{ p("QG", "*bf16", qg), p("KV", "*bf16", kv), p("QN", "*bf16", qn), p("KN", "*bf16", kn), p("POS", "*i32", pos), p("INV", "*fp32", inv), p("QOUT", "*bf16", qout), p("KOUT", "*bf16", kout), aot.float("eps", eps) }, &.{
             ci("H", a.heads), ci("HKV", a.kv_heads), ci("D", a.dim), ci("HALF", a.half), ci("MROPE", 0), ci("ROWS", 0), ci("HSEC", 11), ci("WSEC", 10),
         });

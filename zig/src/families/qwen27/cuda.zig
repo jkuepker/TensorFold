@@ -3,6 +3,7 @@
 pub const config = @import("cuda/shape.zig");
 pub const kernels = @import("cuda/kernels.zig");
 pub const triton = @import("cuda/triton.zig");
+pub const prep_native = @import("cuda/prep_native.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const state = @import("cuda/state.zig");
 pub const round = @import("cuda/round.zig");
