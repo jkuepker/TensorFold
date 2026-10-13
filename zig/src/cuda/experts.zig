@@ -178,8 +178,7 @@ pub const Affine4Experts = struct {
         try launch_.launch(e.pack_fn, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(count) }, .block = .{ .x = 288 } }, s, &a);
     }
 
-    /// experts.make's SwiGLU up: gate then up packed into `out` as [E][n/32][k/64][2][288] int32 (torch.stack on dim 3).
-    /// `scratch` holds `bytes(count, n, k)`; each half is packed there, then copied to its slot of every block.
+    /// experts.make's SwiGLU up: gate then up into `out` as [E][n/32][k/64][2][288] int32; `scratch` is bytes(count, n, k).
     pub fn packGateUp(e: *const Affine4Experts, d: *const Driver, s: Stream, gate: Mats, up: Mats, scratch: u64, out: u64, count: usize, n: usize, k: usize) !void {
         const block = 288 * 4;
         for ([_]Mats{ gate, up }, 0..) |m, i| {
