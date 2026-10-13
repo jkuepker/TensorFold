@@ -20,7 +20,29 @@ pub const prompt_rows: u32 = q.engine.prompt_rows;
 pub const max_lanes: u32 = 1;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1 };
-pub const Loaded = q.native.Loaded;
+
+/// What the native server drives: the 27B's, and the engine the prompt cache copies.
+pub const Loaded = struct {
+    backend: @FieldType(q.native.Loaded, "backend"),
+    facts: @FieldType(q.native.Loaded, "facts"),
+    rows: u32,
+    stream_bytes: usize,
+    free_streams: u32 = 0,
+    learn_bytes: usize = 0,
+    ctx: *anyopaque,
+    deinit: *const fn (*anyopaque) void,
+    lone: ?q.native.LoneRun = null,
+    max_lanes: u32,
+    target: *anyopaque,
+};
+
+/// The prompt cache's copies of a stream's state (qwen27's reuse.zig), the cuts it keeps at, and the rows it needs.
+pub const snap_bytes = q.reuse.snapBytes;
+pub const snap_save = q.reuse.snapSave;
+pub const snap_restore = q.reuse.snapRestore;
+pub const snap_drop = q.reuse.snapDrop;
+// no draft head reads a row ahead, and the prompt's rows give the same bits cut anywhere: any length keeps, anywhere
+pub const snap_rules = .{ .lookahead = 0, .min_prompt = 0 };
 
 /// What this engine refuses before any device work, in words; null when the flags may open it.
 pub fn refusal(_: bool, lanes_asked: u32, lanes_fixed: bool) ?[]const u8 {
@@ -47,11 +69,12 @@ pub const Moe = struct {
     }
 };
 
-/// The engine, its lane backend, and with drafts the MTP head, its drafter and the wrapper that joins them.
+/// The engine, its lane backend, the prompt cache's target, and with drafts the MTP head, its drafter and the wrapper that joins them.
 const Owned = struct {
     gpa: std.mem.Allocator,
     e: *q.Engine,
     lanes: q.Lanes,
+    target: q.reuse.Target,
     head: mtp.Head = undefined,
     drafter: mtp_drafter.Drafter = undefined,
     drafted: lanes.drafted.Drafted = undefined,
@@ -99,15 +122,17 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer e.deinit();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
-    own.* = .{ .gpa = gpa, .e = e, .lanes = try q.Lanes.init(gpa, e, max_lanes) };
+    own.* = .{ .gpa = gpa, .e = e, .lanes = try q.Lanes.init(gpa, e, max_lanes), .target = undefined };
     own.lanes.shared_prompts = false; // every prompt through prefill's chunks, the pass checked against the Python engine
     errdefer own.lanes.deinit();
+    own.target = .{ .e = e, .seqs = &own.lanes.seqs, .held = &own.lanes.held };
     var loaded: Loaded = .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = q.state.max_rows,
         .stream_bytes = q.state.Seq.bytes(e.w.g, o.context),
         .max_lanes = max_lanes,
+        .target = &own.target,
         .ctx = own,
         .deinit = release,
     };

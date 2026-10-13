@@ -12,6 +12,7 @@ const dl = @import("draft_load.zig");
 const dr = @import("draft.zig");
 const drafts = @import("drafts.zig");
 const lone = @import("lone.zig");
+const reuse = @import("reuse.zig");
 const trees = @import("tree.zig");
 const features = @import("features.zig");
 const be = lanes.backend;
@@ -241,13 +242,13 @@ pub const Cuda = struct {
     fn prefillOpened(x: *Cuda, s: *lanes.Stream, seq: *st.Seq) !void {
         if (x.held.on and s.drafts) {
             const ids = s.prompt();
-            return x.e.prefillRows(seq, ids, try x.held.make(x.gpa, x.e.ctx.d, s, ids.len * x.e.w.g.hidden * 2));
+            return reuse.prefill(x.e, s, seq, try x.held.make(x.gpa, x.e.ctx.d, s, ids.len * x.e.w.g.hidden * 2));
         }
         if (x.drafter) |d| if (s.drafts) {
             const ds = try x.draftingOf(s);
             return lone.prefill(x.e, seq, &ds.ctx, d, s.prompt());
         };
-        try x.e.prefill(seq, s.prompt());
+        try reuse.prefill(x.e, s, seq, null);
     }
 
     /// prefill_batch: prompts in shared passes of at most a chunk's rows (a longer one alone, in its chunks).

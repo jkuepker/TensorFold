@@ -13,13 +13,12 @@ const nemotron_slide = @import("nemotron_slide.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{ nemotron.native, qwen27.native, qwen35.native };
 
-/// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
-const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
-    .bytes = nemotron.native.snap_bytes,
-    .save = nemotron.native.snap_save,
-    .restore = nemotron.native.snap_restore,
-    .drop = nemotron.native.snap_drop,
-};
+/// A family's prompt-cache copies (its snap_* functions). A comptime value so the store's pointer stays valid for the process.
+fn snapshots(comptime F: type) *const api.prompt_cache.Snapshots.VTable {
+    return &struct {
+        const v: api.prompt_cache.Snapshots.VTable = .{ .bytes = F.snap_bytes, .save = F.snap_save, .restore = F.snap_restore, .drop = F.snap_drop };
+    }.v;
+}
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
@@ -453,18 +452,20 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
-    // prompt-cache snapshots are Nemotron's (cuda_reuse.zig); a family without them serves without a cache
+    // a family that copies its states (snap_*) keeps prompts; one without serves without a cache
     const cache = if (@hasDecl(F, "snap_bytes")) budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free)) else 0;
+    const state_words = if (@hasDecl(F, "snap_bytes")) try std.fmt.allocPrint(a, "a kept state takes {d:.1} MiB and {d:.1} KiB a prompt token", .{ toMib(F.snap_bytes(loaded.target, 0)), toKib((F.snap_bytes(loaded.target, 1 << 16) - F.snap_bytes(loaded.target, 0)) >> 16) }) else "";
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
         capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache ({s})", .{ toGib(cache), state_words }) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
     if (@hasDecl(F, "snap_bytes") and cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
         // a row's bits ignore the cuts, a kept row costs no call: states keep at any row; the head reads one token on
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0 }, cache - try nemotron.native.snap_ready(loaded.target, cache));
+        const spare = if (@hasDecl(F, "snap_ready")) try F.snap_ready(loaded.target, cache) else 0; // spare storage it sets aside comes out of the budget
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = snapshots(F) }, .{ .lookahead = F.snap_rules.lookahead, .min_prompt = F.snap_rules.min_prompt }, cache - spare);
         h.store = store;
     }
     errdefer if (h.store) |store| {
@@ -494,6 +495,14 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+fn toMib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 20);
+}
+
+fn toKib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 10);
 }
 
 fn toGib(bytes: u64) f64 {

@@ -37,3 +37,11 @@ the `"draft": false` one, sampled requests included. `"draft": false` on a reque
 4. `mtp_check.py URL FIXTURE DUMPS` against a native server with drafts on: the fixture's chat requests and the dumps'
    four prompts (greedy, and the seeded sampled request) drafted, with `"draft": false`, and the Python engine's serial
    reply must all match, with acceptance beside the Python engine's.
+
+Prompt cache: the native CUDA server keeps a stream's state (each DeltaNet layer's recurrence and conv window, each
+attention layer's key and value rows) at the cuts the lane core names, 62 MiB and 20 KiB a prompt token (the startup
+line says so). `cache_check.py record URL FIXTURE` against a server run with `--prompt-cache-gib 0` records three
+conversations turn by turn (a short chat, a three-turn chat, a ~5k-token history, fixed assistant texts between the
+turns); `cache_check.py check URL FIXTURE` against a server with the cache on must give the same reply ids token for token,
+a hit (usage's `cached_tokens`) on every turn after a conversation's first, and `/metrics`' `prefix_cache_hits_total`
+equal to the hits. `serve_check.py check` against a cache-on server is the same check against the Python engine.

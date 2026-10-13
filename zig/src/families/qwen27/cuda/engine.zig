@@ -21,6 +21,9 @@ pub fn chunkBounds(start: usize, end: usize, size: usize, j: usize) [2]usize {
 
 pub const Options = struct { context: usize };
 
+/// Where a prompt pass stops to let the cache keep its state: each of `at` (ascending) ends a chunk and `call` runs there.
+pub const Keep = struct { at: []const u32, ctx: *anyopaque, call: *const fn (ctx: *anyopaque, at: u32) void };
+
 /// A family's own weights and layer pieces beside this engine's: freed in place of `w` before the kernels they read.
 pub const Owner = struct { ptr: *anyopaque, deinit: *const fn (*anyopaque) void };
 
@@ -78,20 +81,34 @@ pub const Engine = struct {
 
     /// prefill_state from an empty state: the prompt in even chunks of at most `prompt_rows`, its last row normed.
     pub fn prefill(e: *Engine, seq: *st.Seq, prompt: []const u32) !void {
-        return e.prefillRows(seq, prompt, null);
+        return e.prefillFrom(seq, prompt, 0, null, null);
     }
 
     /// `prefill`, every row's final normed state also written to `rows` (prompt.len x hidden bf16) for a draft head.
     pub fn prefillRows(e: *Engine, seq: *st.Seq, prompt: []const u32, rows: ?u64) !void {
+        return e.prefillFrom(seq, prompt, 0, null, rows);
+    }
+
+    /// The prompt's rows from `from` (a restored state's position, 0: an empty one); each of `keep.at` ends a chunk and is called there; `rows` as in prefillRows.
+    pub fn prefillFrom(e: *Engine, seq: *st.Seq, prompt: []const u32, from: usize, keep: ?Keep, rows: ?u64) !void {
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len >= seq.capacity) return error.PromptTooLong;
-        try seq.reset(e.ops(), e.w.g);
+        if (from == 0) try seq.reset(e.ops(), e.w.g) else if (seq.pos != from or from >= prompt.len) return error.NotAtMark;
         var f = e.forward();
-        const n = (prompt.len + prompt_rows - 1) / prompt_rows;
-        for (0..n) |j| {
-            const b = chunkBounds(0, prompt.len, prompt_rows, j);
-            f.every = if (rows) |r| r + b[0] * e.w.g.hidden * 2 else null;
-            try f.chunk(prompt[b[0]..b[1]], seq, j == n - 1);
+        var start = from;
+        var next: usize = 0; // the first mark past `start`
+        while (start < prompt.len) {
+            while (keep != null and next < keep.?.at.len and keep.?.at[next] <= start) next += 1;
+            const marked = keep != null and next < keep.?.at.len and keep.?.at[next] <= prompt.len;
+            const end: usize = if (marked) keep.?.at[next] else prompt.len;
+            const n = (end - start + prompt_rows - 1) / prompt_rows;
+            for (0..n) |j| {
+                const b = chunkBounds(start, end, prompt_rows, j);
+                f.every = if (rows) |r| r + b[0] * e.w.g.hidden * 2 else null;
+                try f.chunk(prompt[b[0]..b[1]], seq, b[1] == prompt.len);
+            }
+            if (marked) keep.?.call(keep.?.ctx, @intCast(end));
+            start = end;
         }
     }
 
