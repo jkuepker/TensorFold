@@ -334,6 +334,34 @@ fn variant(rig: *Rig, vi: usize) !void {
     }
 }
 
+// Microseconds one attention call takes back to back, replay against native (information, not a gate).
+fn timing(rig: *Rig, specs: []const Spec) !void {
+    var par: [16][128]i32 = undefined;
+    try rig.load(specs, 0);
+    try inputs(rig, false);
+    const sg = try stage(rig, specs, &par);
+    try rig.s.synchronize();
+    var start = try cuda.Event.init(rig.gpu.d, true);
+    defer start.deinit();
+    var end = try cuda.Event.init(rig.gpu.d, true);
+    defer end.deinit();
+    const reps = 100;
+    const offs = sg.r.offsets(3, 0);
+    var us: [2]f64 = undefined;
+    for ([_]bool{ false, true }, 0..) |use_native, i| {
+        var t = rig.replay();
+        if (use_native) t.tree = rig.nat;
+        for (0..reps + 10) |n| {
+            if (n == 10) try start.record(rig.s);
+            try t.attention(rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, sg.r.attn, rig.part[i].parts(), rig.out[i].ptr, attn);
+        }
+        try end.record(rig.s);
+        try end.synchronize();
+        us[i] = @as(f64, try cuda.Event.elapsedMs(start, end)) * 1000 / reps;
+    }
+    std.debug.print("  p {d:>5} rows {d:>3}: replay {d:>7.1} us, native {d:>7.1} us\n", .{ specs[0].p, specs[0].w, us[0], us[1] });
+}
+
 pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
     const gpa = gpu.gpa;
     var stream = try cuda.Stream.init(gpu.d, true);
@@ -388,6 +416,7 @@ pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
         std.debug.print("  variant {d} failed: {t}\n", .{ vi, e });
         rig.bad += 1;
     };
+    for ([_]Spec{ .{ .p = 4096, .w = 1 }, .{ .p = 4096, .w = 16 }, .{ .p = 8191, .w = 1 }, .{ .p = 8191, .w = 16 }, .{ .p = 8191, .w = 64 } }) |sp| try timing(&rig, &.{sp});
     var missing: usize = 0;
     for (k.triton.variants, rig.covered) |v, c| {
         const f = v.spec.@"fn";

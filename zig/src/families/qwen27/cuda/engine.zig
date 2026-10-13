@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const c = @import("shape.zig");
 const kern = @import("kernels.zig");
 const tri = @import("triton.zig");
+const tree_native = @import("tree_native.zig");
 const st = @import("state.zig");
 const wts = @import("weights.zig");
 const Forward = @import("forward.zig").Forward;
@@ -32,11 +33,20 @@ pub const Engine = struct {
     ctx: *const cuda.Context,
     s: cuda.Stream,
     k: kern.Kernels,
+    tree: ?tree_native.Native, // qwen_attention.cu where the GPU is the one it was shown byte-equal on, else the captured launches
     w: wts.Weights,
     scratch: st.Scratch,
     context: usize,
     hooks: ?Forward.Hooks = null, // a family's MLP in place of the dense one (the Qwen3.6 MoE)
     owner: ?Owner = null, // set when a family loaded `w` and owns it
+
+    fn treeKernels(ctx: *const cuda.Context) !?tree_native.Native {
+        if (!cuda.kernels.available) return null;
+        return tree_native.Native.load(ctx.d, try ctx.capability()) catch |err| switch (err) {
+            error.UnverifiedArchitecture => null,
+            else => err,
+        };
+    }
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !*Engine {
         const cfg = try c.Config.read(gpa, io, dir);
@@ -50,6 +60,8 @@ pub const Engine = struct {
         errdefer e.s.deinit();
         e.k = try kern.Kernels.load(gpa, io, ctx, kernels, g.linear_v_heads);
         errdefer e.k.deinit();
+        e.tree = try treeKernels(ctx);
+        errdefer if (e.tree) |*n| n.deinit();
         e.w = try wts.load(gpa, io, e.ops(), dir, cfg);
         errdefer e.w.deinit();
         e.scratch = try st.Scratch.init(gpa, ctx.d, g, prompt_rows, o.context);
@@ -61,6 +73,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         e.scratch.deinit();
         if (e.owner) |o| o.deinit(o.ptr) else e.w.deinit();
+        if (e.tree) |*n| n.deinit();
         e.k.deinit();
         e.s.deinit();
         e.gpa.destroy(e);
@@ -71,7 +84,7 @@ pub const Engine = struct {
     }
 
     pub fn forward(e: *Engine) Forward {
-        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .set = &e.k.triton, .s = e.s }, .s = &e.scratch, .hooks = e.hooks };
+        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .set = &e.k.triton, .s = e.s, .tree = e.tree }, .s = &e.scratch, .hooks = e.hooks };
     }
 
     /// A stream's state for `capacity` positions (its caches, recurrences and conv windows), empty.

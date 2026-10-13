@@ -140,9 +140,7 @@ __device__ __forceinline__ void load_q(uint32_t (&qf)[16][4], const bf16* lo, co
     }
 }
 
-// attention._tile over `tiles` 64-key tiles. `src` gives the tile rows (krow, vrow: null is a zero row) and how many leading keys of a
-// tile count (valid). Scores are the mma chain over the head dim, p the bf16 tile, o an mma chain onto o * alpha; the row max and sum
-// meet across the four warps as the Triton program's reduction does (the warp w holds keys 8w..8w+7 and 32+8w..32+8w+7).
+// attention._tile over `tiles` 64-key tiles: dot chains in key and head-dim order, a row max and sum that meet across the 4 warps (warp w holds keys 8w..8w+7 and 32+8w..32+8w+7).
 template <class Src> __device__ void attend(Smem& sm, Acc& a, const uint32_t (&qf)[16][4], int tiles, const Src& src) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, g = lane >> 2, t4 = lane & 3;
     const int mj = lane >> 3, mi = lane & 7;  // ldmatrix: this lane's matrix and row
