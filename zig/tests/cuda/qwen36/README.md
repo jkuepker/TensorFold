@@ -88,3 +88,15 @@ first instruction and marks the kernel `pdl` in `aot.json`. The loader launches 
 rebuilt SASS has the same instructions plus the wait (`ACQBULK`, ahead of every memory access); on some kernels ptxas
 also renames registers or reorders independent instructions around it, so the checks above must pass on the new set,
 as they do on the captured one. Point `TENSORFOLD_CUDA_KERNELS` at it.
+
+## Native tree attention
+
+`kernels/cuda/qwen_attention.cu` (`tree_native.zig`) is attention.py's `_shared`, `_tail` and `_merge` in native CUDA: both dots are
+`mma.m16n8k16` chains in key and head-dim order onto `o * alpha`, the softmax is `ex2.approx` of `x * log2(e)`, `l` is `fma(l, alpha, row sum)`
+with the row sum taken as the Triton program reduces it (per thread in register order, `xor 2`, `xor 1`, then the four warps as
+`(w0 + w2) + (w1 + w3)`), the fold is `fma(old, a, new * b)` and the output is `div.full.f32`. `tf-cuda-test qwen-attention <kernel set> [rounds]`
+runs it against the captured launches on identical buffers (plans from `round.stage`; committed lengths 0 to 8191, windows of 1 to 128
+rows as chains and random trees, 2 to 16 streams, normal and heavy-tail keys, NaN words past each stream's committed rows, every captured
+`_shared`/`_tail`/`_merge` variant with its pointer alignments and `W`); every partial slot (0xff-filled first) and the bf16 output must be
+byte-equal. The engine takes the native kernels on sm_121 only (`tree_native.verified_capability`); `tree_native.exact` turns one kernel
+back to the replay. A kernel set without those three entries (`aot.json` stripped of them) runs the whole engine on the native ones.
