@@ -51,10 +51,10 @@ def routed(prefix: str, get: Callable, top_k: int) -> Routed:
     return Routed(router.to(torch.bfloat16).contiguous(), experts, int(top_k))
 
 
-def load(model_dir: str | Path) -> Weights:
-    """The checkpoint on the GPU, projections packed for the shared matmul and experts for the grouped kernels."""
+def load(model_dir: str | Path, skip=None) -> Weights:
+    """The checkpoint on the GPU, projections packed for the shared matmul and experts for the grouped kernels (``skip``: tensors the text model leaves alone)."""
 
-    return load_dense(model_dir, tiled=True,
+    return load_dense(model_dir, tiled=True, skip=skip,
                       mlp=lambda prefix, get, qlinear, cfg: {"moe": routed(prefix, get, cfg.top_k)})
 
 
@@ -73,13 +73,13 @@ class MTP:
     norm: torch.Tensor
 
 
-def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
-    """The MTP layer's MLX tensors (named ``mtp.*``) from the checkpoint or its side file, or None without one."""
+def mtp_tensors(model_dir: str | Path, path: str | Path | None = None) -> dict[str, torch.Tensor] | None:
+    """The MTP layer's MLX tensors (named ``mtp.*``) from ``path``, else the checkpoint or its side file, or None without one."""
 
     from tensorfold.cuda.direct_read import SafeTensors
 
     model_dir = Path(model_dir)
-    files = [model_dir / MTP_FILE] if (model_dir / MTP_FILE).is_file() else []
+    files = [Path(path)] if path is not None else [model_dir / MTP_FILE] if (model_dir / MTP_FILE).is_file() else []
     index = model_dir / "model.safetensors.index.json"
     if not files and index.is_file():
         names = json.loads(index.read_text())["weight_map"]
@@ -93,12 +93,12 @@ def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
     return out or None
 
 
-def load_mtp(model_dir: str | Path, w: Weights, device: str = "cuda") -> MTP | None:
-    """The MTP layer on the GPU, packed like the model's own layers, or None if the checkpoint has none."""
+def load_mtp(model_dir: str | Path, w: Weights, device: str = "cuda", path: str | Path | None = None) -> MTP | None:
+    """The MTP layer on the GPU, packed like the model's own layers, or None if the checkpoint has none (``path``: a side file elsewhere)."""
 
     from tensorfold.families.qwen3_5.cuda.qmm_fast import tile
 
-    raw = mtp_tensors(model_dir)
+    raw = mtp_tensors(model_dir, path)
     if raw is None:
         return None
 
