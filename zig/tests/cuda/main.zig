@@ -18,6 +18,7 @@ const grouped_tests = @import("grouped_tests.zig");
 const qwen35_router_tests = @import("qwen35_router_tests.zig");
 const qwen36_tests = @import("qwen36_tests.zig");
 const qwen36_mtp_tests = @import("qwen36_mtp_tests.zig");
+const qmm_group_tests = @import("qmm_group_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
 const fp8_experts_tests = @import("fp8_experts_tests.zig");
 const nvfp4_experts_tests = @import("nvfp4_experts_tests.zig");
@@ -58,6 +59,7 @@ const usage =
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
+    \\  qmm-group <aot>           the fused projections (denseGroup) vs one launch each, byte for byte, 1 to 80 rows
     \\  qwen36-mtp MODEL <aot> <oracle> [PROMPTS] The Qwen3.6 MTP head vs the Python dumps (qwen36/capture.py --mtp), byte for byte
     \\  qwen36-layers MODEL <aot> <oracle> [PROMPTS] [--teacher] [--steps N] Qwen3.6 engine vs the Python dumps (qwen36/capture.py), byte for byte
     \\  qwen35-router <aot> <dir> [rounds] Qwen3.6 router: Triton replay vs Python bytes (qwen35/capture_router.py), native vs both
@@ -143,6 +145,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "qmm-group")) return qmm_group_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "qwen36-mtp")) return qwen36_mtp_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else "story,code,facts,long");
     if (std.mem.eql(u8, cmd, "qwen36-layers")) {
         var only: []const u8 = "story,code,facts,long";

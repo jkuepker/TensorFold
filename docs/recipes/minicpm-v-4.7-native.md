@@ -72,6 +72,21 @@ window: the model with its scratch takes 20.02 GiB (20.56 GiB with the 558 MiB d
 (1.09 GiB with drafts), and a kept prompt state takes 62 MiB plus 20 KiB a prompt token (24 KiB with drafts). Load took
 7 to 31 s, the longer ones reading the weights from disk.
 
+## Toolkit and driver
+
+Two settings outside the code move single-stream decode on a GB10, and neither changes an output byte.
+
+- nvcc 13.3 builds the fatbins (`-Dnvcc=`). Its SASS for the expert and `qmm_group` kernels is instruction for instruction
+the Python 0.6.6 extension's (the NGC image builds it with 13.3); nvcc 13.0 emits a different expert kernel (192
+registers and a stack frame where 13.3 has 194 and none) that decodes about 1% slower. Both pass every exactness check.
+- The server opens `libcuda.so.1`, and the CUDA 13.3 compat `libcuda` from the NGC PyTorch image (under
+`/usr/local/cuda/compat/lib`, on the unchanged 580 kernel driver) closes the gaps between launches that the stock 580
+`libcuda` leaves: the GPU is busy 98% of a serial token instead of 92%. Put a folder holding it first on the loader path:
+
+```bash
+LD_LIBRARY_PATH=<folder with the compat libcuda.so.1> tensorfold-native serve ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit ...
+```
+
 ## Parity with the Python 0.6.6 engine
 
 `zig/tests/cuda/minicpm/fixture.json` was recorded from the Python 0.6.6 MiniCPM-V 4.7 engine, serial, drafts off,
@@ -133,6 +148,8 @@ Quality, `localeval quality --bench mmlu --limit 25 --max-tokens 2048 --judge no
 
 ## Not done
 
+- TODO: the expert kernels run about 8% longer a launch than the Python engine's identical SASS (gate/up 58.7 against
+54.0 us at one row); the allocator, module loading, nvcc and `libcuda` are not the cause.
 - TODO: CUDA graphs on the native engine (single-stream decode with drafts is 16 to 24% under the Python engine's).
 - TODO: images and `--vision` (upstream #598).
 - TODO: native GSM8K, IFEval and HumanEval, 32k and long-context code runs, memory at 262,144 tokens.
