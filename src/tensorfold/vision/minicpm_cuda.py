@@ -15,9 +15,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Sequence
 
-MAX_PATCHES = 16384                  # one tower call's patches (whole units, about 16 slices); a request goes on in runs
+MAX_PATCHES = 16384                  # one tower call's patches (whole units, about 16 slices); more go on in runs
 WORKSPACE_BYTES = 1024**3            # activations of one call (measured peak well under this) on the resident tower
-OFFLOAD_WORKSPACE_BYTES = int(2 * 1024**3)   # --vision-offload: the tower's visit to the GPU plus one call's activations
+OFFLOAD_WORKSPACE_BYTES = 2 * 1024**3   # --vision-offload: the tower's visit to the GPU plus one call's activations
 PREFIXES = ("model.vision_tower.", "model.merger.")
 
 
@@ -49,7 +49,7 @@ def build(raw: dict, vision: dict):
     import torch.nn.functional as F
     from torch import nn
 
-    D, I, heads = vision["hidden_size"], vision["intermediate_size"], vision["num_attention_heads"]
+    D, inner, heads = vision["hidden_size"], vision["intermediate_size"], vision["num_attention_heads"]
     eps = float(vision.get("layer_norm_eps", 1e-6))
     p = vision["patch_size"]
     side = vision["image_size"] // p
@@ -85,7 +85,7 @@ def build(raw: dict, vision: dict):
     class MLP(nn.Module):
         def __init__(self):
             super().__init__()
-            self.fc1, self.fc2 = nn.Linear(D, I), nn.Linear(I, D)
+            self.fc1, self.fc2 = nn.Linear(D, inner), nn.Linear(inner, D)
 
         def forward(self, x):
             return self.fc2(gelu_tanh(self.fc1(x)))
@@ -105,7 +105,7 @@ def build(raw: dict, vision: dict):
             super().__init__()
             self.self_attn, self.layer_norm1 = Attention(), nn.LayerNorm(D, eps=eps)
             self.pre_norm = nn.LayerNorm(4 * D, eps=eps)
-            self.linear_1, self.linear_2 = nn.Linear(4 * D, 4 * I), nn.Linear(4 * I, D)
+            self.linear_1, self.linear_2 = nn.Linear(4 * D, 4 * inner), nn.Linear(4 * inner, D)
 
         def forward(self, x, sizes):
             order, start = [], 0
@@ -242,7 +242,8 @@ class Lane:
     (``start``). Disabled (no --vision), the tower's tensors count nothing and nothing loads."""
 
     def __init__(self, model_dir: Path, *, enabled: bool = True, allow_urls: bool = False, offload: bool = False):
-        self.model_dir, self.enabled, self.allow_urls, self.offload = Path(model_dir), bool(enabled), allow_urls, offload
+        self.model_dir, self.enabled = Path(model_dir), bool(enabled)
+        self.allow_urls, self.offload = allow_urls, offload
 
     def geometry(self, base):
         if not self.enabled:

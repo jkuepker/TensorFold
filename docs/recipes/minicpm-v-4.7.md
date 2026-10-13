@@ -96,7 +96,7 @@ prompts, 128 forced tokens, median of three; two streams aggregate):
 | TensorFold, text-only view of the checkpoint, drafted | 154.8 | 153.2 | 147.6 | 142.1 | 119.6 | 6,599 tok/s |
 | TensorFold, `--vision`, drafted (two runs) | 162.5 / 162.2 | 162.6 / 168.7 | 150.6 / 144.5 | 123.0 / 139.7 | 113.5 / 123.7 | 6,452 / 6,474 tok/s |
 | TensorFold, `--no-drafts` | 92.1 | 89.7 | 87.5 | 79.6 | 80.9 | 7,033 tok/s |
-| vLLM 0.31.1rc1, NVFP4A16 (attention and head BF16) | 99.4 | 102.5 | 101.3 | 93.1 | 115.1 | |
+| vLLM 0.31.1rc1, NVFP4A16 attn+lm_head (TODO(josef): exact scheme) | 99.4 | 102.5 | 101.3 | 93.1 | 115.1 | |
 | vLLM 0.31.1rc1, NVFP4A16, DSpark k=4 | 117.4 | 118.2 | 115.3 | 62.6 | | |
 
 `--vision` leaves text decoding as it was: the two runs scatter around the text-only one (localeval flagged 14-26%
@@ -111,7 +111,8 @@ TODO(josef): the vLLM serve commands, and any image-throughput numbers you want 
 ## Caveats
 
 - CUDA, one GPU. No Mac engine (the MLX path refuses the family), no `--tp 2`.
-- Images only: video is refused, and so is `downsample_mode` 4x and per-request `mm_processor_kwargs`.
+- Images only: video is refused, and so is a checkpoint with `downsample_mode` 4x. Per-request
+  `mm_processor_kwargs` (vLLM's `max_slice_nums`, `downsample_mode`) are not read: the checkpoint's settings apply.
 - Image input decodes one stream at a time: `--vision` with `--parallel` above 1 is refused at startup. Text-only
   servers take `--parallel` as on Qwen3.6 MoE.
 - Several images in one request work (each with its own `<image_id>`, the canvas positions laid out per image), up

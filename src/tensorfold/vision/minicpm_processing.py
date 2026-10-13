@@ -189,7 +189,8 @@ def placeholder(tokens: Tokens, index: int | None, sizes: Sequence[tuple[int, in
     text = tokens.image_start_text + tokens.image_text * counts[0] + tokens.image_end_text
     rows, cols = grid
     if rows > 0 and cols > 0:
-        block = tokens.slice_start_text + tokens.image_text * (counts[1] if len(counts) > 1 else 0) + tokens.slice_end_text
+        pads = tokens.image_text * (counts[1] if len(counts) > 1 else 0)
+        block = tokens.slice_start_text + pads + tokens.slice_end_text
         text += "\n".join(block * cols for _ in range(rows))
     if index is not None:
         text = f"{tokens.image_id_start_text}{index}{tokens.image_id_end_text}" + text

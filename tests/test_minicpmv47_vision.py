@@ -218,7 +218,7 @@ def test_the_ported_tower_and_merger_match_transformers():
         for parameter in reference.parameters():
             parameter.normal_(0, 0.2)
     ours = build(raw, raw["vision_config"]).eval()
-    state = {k[len("model."):] if k.startswith("model.") else k: v
+    state = {k.removeprefix("model."): v
              for k, v in reference.state_dict().items() if k.startswith(("vision_tower.", "merger."))}
     ours.load_state_dict(state, strict=True)
     sizes = [(8, 12), (8, 8), (4, 8)]

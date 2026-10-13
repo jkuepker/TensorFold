@@ -39,7 +39,7 @@ def vision_tensor(name: str) -> bool:
 def text_skip(name: str) -> bool:
     """Tensors the text model does not read: the vision tower and merger, and any MTP layer (read on its own)."""
 
-    return vision_tensor(name) or name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp.")
+    return vision_tensor(name) or name.startswith(("vision_tower", "mtp.")) or ".mtp." in name
 
 
 def mtp_file(model_dir: str | Path, *, cached=None) -> tuple[Path | None, str]:
