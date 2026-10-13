@@ -12,6 +12,7 @@ const dl = @import("draft_load.zig");
 const dr = @import("draft.zig");
 const drafts = @import("drafts.zig");
 const lone = @import("lone.zig");
+const reuse = @import("reuse.zig");
 const trees = @import("tree.zig");
 const be = lanes.backend;
 
@@ -240,7 +241,7 @@ pub const Cuda = struct {
             const ds = try x.draftingOf(s);
             return lone.prefill(x.e, seq, &ds.ctx, d, s.prompt());
         };
-        try x.e.prefill(seq, s.prompt());
+        try reuse.prefill(x.e, s, seq);
     }
 
     /// prefill_batch: prompts in shared passes of at most a chunk's rows (a longer one alone, in its chunks).

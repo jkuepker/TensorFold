@@ -19,3 +19,11 @@ answers like the Python 0.6.6 engine run serial. `serve_check.py record URL FIXT
 ids (/tokenize), greedy reply ids (`return_token_ids`, temperature 0, 256 tokens, thinking off) and parsed tool calls;
 `serve_check.py check URL FIXTURE` reruns the fixture against any server and compares the chat template's ids (a), the
 reply ids (b) and the tool calls (c). Stdlib Python only.
+
+Prompt cache: the native CUDA server keeps a stream's state (each DeltaNet layer's recurrence and conv window, each
+attention layer's key and value rows) at the cuts the lane core names, 62 MiB and 20 KiB a prompt token (the startup
+line says so). `cache_check.py record URL FIXTURE` against a server run with `--prompt-cache-gib 0` records three
+conversations turn by turn (a short chat, a three-turn chat, a ~5k-token history, fixed assistant texts between the
+turns); `cache_check.py check URL FIXTURE` against a server with the cache on must give the same reply ids token for token,
+a hit (usage's `cached_tokens`) on every turn after a conversation's first, and `/metrics`' `prefix_cache_hits_total`
+equal to the hits. `serve_check.py check` against a cache-on server is the same check against the Python engine.
