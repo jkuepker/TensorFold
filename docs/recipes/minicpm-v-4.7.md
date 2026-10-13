@@ -55,7 +55,7 @@ Without one it refuses to start unless `--no-drafts` is given.
 
 ## Install
 
-This family runs on the 0.6 release line (the Python CUDA engine). On a DGX Spark, run it in NVIDIA's PyTorch
+This family is on the `minicpmv47-py06` branch of the [jkuepker/TensorFold](https://github.com/jkuepker/TensorFold) fork, on the 0.6 release line (the Python CUDA engine). On a DGX Spark, run it in NVIDIA's PyTorch
 container, which already has every dependency:
 
 ```bash
@@ -63,7 +63,7 @@ docker run -d --name tensorfold --gpus all --ipc=host --network host --ulimit me
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/models:/models \
   nvcr.io/nvidia/pytorch:26.07-py3 sleep infinity
-docker exec tensorfold pip install --no-deps "git+https://github.com/ashhart/TensorFold@python-0.6"
+docker exec tensorfold pip install --no-deps "git+https://github.com/jkuepker/TensorFold@minicpmv47-py06"
 ```
 
 Run the commands below with `docker exec -it tensorfold`; the container sees the checkpoint as `/models/...`. The
