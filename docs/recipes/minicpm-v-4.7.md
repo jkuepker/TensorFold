@@ -8,13 +8,15 @@ no Mac engine: `tensorfold serve` on a Mac refuses it.
 
 ## Checkpoint
 
-There is no published MLX checkpoint yet. Convert openbmb's BF16 release with `tools/minicpmv47_to_mlx.py`, using the
-Python that has mlx-lm (on a Mac, or anywhere mlx-lm installs):
+There is no published MLX checkpoint yet. Convert openbmb's BF16 release (66 GB) with `tools/minicpmv47_to_mlx.py`,
+using the Python that has mlx-lm. This was tested on an Apple Silicon Mac with mlx-lm 0.31.3 (MLX 0.32.1), where the
+conversion takes about a minute; it has not been tried on Linux. Then copy the 20 GB result to the Spark:
 
 ```bash
 hf download openbmb/MiniCPM-V-4.7-35B-A3B --local-dir ~/models/minicpm-v47-bf16
 python tools/minicpmv47_to_mlx.py --src ~/models/minicpm-v47-bf16 --out ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit
 python tools/minicpmv47_mlx_check.py inventory --out ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit   # optional checks
+rsync -a ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit spark:models/                                   # to the DGX Spark
 ```
 
 The converter runs `mlx_lm.convert` on a text-only view of the checkpoint, so the language weights get mlx-lm's own
@@ -38,7 +40,7 @@ The engine takes the first of: `TF_QWEN36_MTP=/path/mtp-4bit.safetensors` (`0` f
 beside the checkpoint, or the cached `TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP` file, and prints which it used:
 
 ```bash
-hf download TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP mtp-4bit.safetensors      # 0.5 GB, once
+hf download TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP mtp-4bit.safetensors      # 0.5 GB, once, on the Spark (~/.cache/huggingface, mounted below)
 ```
 
 Without one it refuses to start unless `--no-drafts` is given.
@@ -57,13 +59,13 @@ docker run -d --name tensorfold --gpus all --ipc=host --network host --ulimit me
 docker exec tensorfold pip install --no-deps "git+https://github.com/jkuepker/TensorFold@minicpmv47-066"
 ```
 
-Run the commands below with `docker exec -it tensorfold` and the checkpoint under `/models`. The first start builds
-the CUDA kernels (about 30 s).
+Run the commands below with `docker exec -it tensorfold`; the container sees the checkpoint as `/models/...`. The
+first start builds the CUDA kernels (about 30 s).
 
 ## Serve
 
 ```bash
-tensorfold serve ~/models/MiniCPM-V-4.7-35B-A3B-MLX-4bit --name minicpm --context 49152 --vision
+docker exec -it tensorfold tensorfold serve /models/MiniCPM-V-4.7-35B-A3B-MLX-4bit --name minicpm --context 49152 --vision
 ```
 
 Without `--vision` the tower is not loaded and its tensors are left out of the memory estimate. Text requests are
@@ -117,6 +119,10 @@ Speed is `localeval speed --thinking off --concurrency 2`: decode tok/s at about
 | TensorFold, `--no-drafts` | 92.1 | 89.7 | 87.5 | 79.6 | 80.9 | 7,033 |
 | vLLM 0.31.1rc1.dev296, NVFP4 W4A16 (attention + lm_head), Marlin | 99.4 | 102.5 | 101.3 | 93.1 | 115.1 | - |
 | same vLLM, OpenBMB's DSpark drafter, 4 drafts | 117.4 | 118.2 | 115.3 | 62.6 | 136.4 | - |
+
+"2 streams aggregate" is two requests sent at once. TensorFold's default server runs them one after the other, so
+its figure is close to one stream's speed; vLLM runs them together. `--parallel 2` was not measured for this model,
+and `--vision` refuses it.
 
 The vLLM rows use the checkpoint and serve command from the
 [NVFP4 recipe](https://github.com/jkuepker/minicpm-v47-nvfp4a16-dgx-spark) (`--gpu-memory-utilization 0.30`,
