@@ -120,10 +120,7 @@ pub const Forward = struct {
             switch (layer.mixer) {
                 .delta => |d| {
                     const rec = s.records[i];
-                    try f.ops.dense(s.y, s.xs, d.qkv, rec.qkv, W);
-                    try f.ops.dense(s.y, s.xs, d.z, s.z, W);
-                    try f.ops.dense(s.y, s.xs, d.b, s.b, W);
-                    try f.ops.dense(s.y, s.xs, d.a, s.a, W);
+                    try f.ops.denseGroup(s.y, s.xs, &.{ .{ .q = d.qkv, .out = rec.qkv }, .{ .q = d.z, .out = s.z }, .{ .q = d.b, .out = s.b }, .{ .q = d.a, .out = s.a } }, W);
                     const sid: ?u64 = if (r.multi) r.sids else null;
                     try f.t.gdnPre(rec.qkv, r.conv(parts, s, g_, i, lin), d.conv, r.windows, sid, s.a, s.b, d.a_log, d.dt_bias, rec.q, rec.k, rec.v, rec.g, rec.beta, W, f.gdnShape());
                     const state = if (r.multi) 0 else parts[0].seq.rec[i];
@@ -135,9 +132,7 @@ pub const Forward = struct {
                 },
                 .attention => |a| {
                     const rec = s.attn_records[i];
-                    try f.ops.dense(s.y, s.xs, a.q, s.qg, W);
-                    try f.ops.dense(s.y, s.xs, a.k, s.key, W);
-                    try f.ops.dense(s.y, s.xs, a.v, rec.v, W);
+                    try f.ops.denseGroup(s.y, s.xs, &.{ .{ .q = a.q, .out = s.qg }, .{ .q = a.k, .out = s.key }, .{ .q = a.v, .out = rec.v } }, W);
                     try f.t.attnPrep(s.qg, s.key, a.q_norm, a.k_norm, r.pos, w.inv_freq, s.q_rot, rec.k, W, f.attnShape(), c.eps);
                     try f.t.attention(s.q_rot, rec.k, rec.v, s.origin, r.offsets(i, att), r.attn, .{ .o = s.part_o, .m = s.part_m, .l = s.part_l }, s.attn, f.attnShape());
                     try f.t.gateMul(s.attn, s.qg, s.gated, s.gated_xs, W, g_.query_heads, c.head_dim);

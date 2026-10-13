@@ -47,6 +47,9 @@ pub const Copy = extern struct { dst: u64, src: u64, bytes: u64 };
 /// A tiled 4-bit projection: packed words, (kg, npad) scales and biases, n outputs from k inputs.
 pub const QLinear = struct { w: u64, s: u64, b: u64, n: usize, k: usize, npad: usize };
 
+/// One projection of a denseGroup: its weights and where its (rows, n) bf16 output lands.
+pub const Item = struct { q: QLinear, out: u64 };
+
 pub const Kernels = struct {
     d: *const cuda.Driver,
     mods: [15]cuda.Module,
@@ -170,6 +173,45 @@ pub const Ops = struct {
         if (rows > 16) return o.wideTile(x, xs, q, out, rows, sk);
         // Python's clusters, a CTA a K slice; lane_gemv (byte-equal) when TF_QWEN27_GEMV_ROWS asks for it
         return if (sk > 1 and rows <= o.k.gemv_rows) o.gemv(x, xs, q, out, rows, sk) else o.cluster(x, xs, q, out, rows, sk);
+    }
+
+    /// qmm.matmul_group on sm_12x: up to four projections of one input in one launch, each with the bits of its own dense().
+    pub fn denseGroup(o: Ops, x: u64, xs: u64, items: []const Item, rows: usize) !void {
+        if (items.len > 4) return error.TooManyParts;
+        if (items.len == 1 or rows <= o.k.gemv_rows) {
+            for (items) |it| try o.dense(x, xs, it.q, it.out, rows);
+            return;
+        }
+        const wide_i: ?usize = if (rows <= 16) null else if (rows <= 32) 0 else if (rows <= 64) 1 else 2;
+        const bm: usize = if (wide_i) |i| wide[i].bm else 16;
+        const bn: usize = if (wide_i) |i| wide[i].bn else 64;
+        const rows_t = (rows + bm - 1) / bm;
+        var c: usize = 1;
+        for (items) |it| c = @max(c, splitK(it.q.n, it.q.k));
+        var parts: Parts = std.mem.zeroes(Parts);
+        parts.count = int(items.len);
+        var clusters: usize = 0;
+        for (items, 0..) |it, i| {
+            if (it.q.k != items[0].q.k) return error.PartsDifferInK;
+            const sk = splitK(it.q.n, it.q.k);
+            const tiles = (it.q.n + bn - 1) / bn;
+            parts.p[i] = .{ .w = it.q.w, .scales = it.q.s, .biases = it.q.b, .out = it.out, .n = int(it.q.n), .npad = int(it.q.npad), .sk = int(sk), .tiles = int(tiles), .first = int(clusters) };
+            clusters += rows_t * ((tiles + c / sk - 1) / (c / sk)); // a cluster of c CTAs covers c / sk column tiles
+        }
+        const k = items[0].q.k;
+        var a: cuda.Args = .{};
+        a.add(x);
+        a.add(xs);
+        a.add(parts);
+        for ([_]usize{ rows, k, k, rows_t, c }) |v| a.add(int(v));
+        const cfg: cuda.Config = .{
+            .grid = .{ .x = u(clusters * c) },
+            .block = .{ .x = if (wide_i) |i| wide[i].threads else 128 },
+            .shared = if (wide_i) |i| wide[i].smem else group_smem,
+            .cluster = if (c > 1) .{ .x = u(c) } else null,
+            .pdl = o.k.gb10,
+        };
+        try cuda.launch.launch(if (wide_i) |i| o.k.wide[i] else o.k.group, cfg, o.s, &a);
     }
 
     /// qmm.matmul at a K split the caller names (matmul_rows takes the stacked weight's for each part).
