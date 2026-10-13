@@ -40,7 +40,7 @@ pub const Engine = struct {
     hooks: ?Forward.Hooks = null, // a family's MLP in place of the dense one (the Qwen3.6 MoE)
     owner: ?Owner = null, // set when a family loaded `w` and owns it
 
-    fn treeKernels(ctx: *const cuda.Context) !?tree_native.Native {
+    pub fn treeKernels(ctx: *const cuda.Context) !?tree_native.Native {
         if (!cuda.kernels.available) return null;
         return tree_native.Native.load(ctx.d, try ctx.capability()) catch |err| switch (err) {
             error.UnverifiedArchitecture => null,
