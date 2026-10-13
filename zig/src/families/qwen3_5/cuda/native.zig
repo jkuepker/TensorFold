@@ -26,7 +26,7 @@ pub fn refusal(drafts: bool, lanes_asked: u32, lanes_fixed: bool) ?[]const u8 {
 }
 
 /// The checkpoint's MoE weights and block, owned by the engine in place of its dense weights.
-const Moe = struct {
+pub const Moe = struct {
     gpa: std.mem.Allocator,
     w: weights.Weights,
     block: moe.Block,
@@ -47,7 +47,7 @@ const Moe = struct {
 const Owned = struct { gpa: std.mem.Allocator, e: *q.Engine, lanes: q.Lanes };
 
 /// The engine for a Qwen3.6 checkpoint: the 27B's, loaded with the MoE weights, hooked with the MoE block.
-fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, context: usize) !*q.Engine {
+pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, context: usize) !*q.Engine {
     const e = try gpa.create(q.Engine);
     errdefer gpa.destroy(e);
     e.gpa = gpa;

@@ -281,6 +281,7 @@ def main() -> int:
     ap.add_argument("--compare", nargs=2, metavar="DIR")
     ap.add_argument("--weights-only", action="store_true", help="write weights.txt and stop")
     ap.add_argument("--context", type=int, default=8192)
+    ap.add_argument("--mtp", action="store_true", help="the MTP head's calls and drafted rounds instead (capture_mtp.py)")
     ap.add_argument("--tools", default="", help="folder of triton_aot_manifest.py: record every Triton launch (launches.json, jit.json)")
     a = ap.parse_args()
     if a.compare:
@@ -296,6 +297,10 @@ def main() -> int:
         import triton_aot_manifest as aot
 
         rec = aot.Recorder().install()
+    if a.mtp:
+        import capture_mtp
+
+        return capture_mtp.run(a, out, rec)
 
     import torch
     import tensorfold

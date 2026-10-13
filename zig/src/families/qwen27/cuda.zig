@@ -5,6 +5,8 @@ pub const kernels = @import("cuda/kernels.zig");
 pub const triton = @import("cuda/triton.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const state = @import("cuda/state.zig");
+pub const round = @import("cuda/round.zig");
+pub const tree = @import("cuda/tree.zig");
 pub const Forward = @import("cuda/forward.zig").Forward;
 pub const Part = @import("cuda/forward.zig").Part;
 pub const engine = @import("cuda/engine.zig");
@@ -14,6 +16,7 @@ pub const native = @import("cuda/native.zig");
 pub const draft = @import("cuda/draft.zig");
 pub const lone = @import("cuda/lone.zig");
 pub const drafts = @import("cuda/drafts.zig");
+pub const features = @import("cuda/features.zig");
 
 test {
     _ = config;

@@ -78,6 +78,11 @@ pub const Engine = struct {
 
     /// prefill_state from an empty state: the prompt in even chunks of at most `prompt_rows`, its last row normed.
     pub fn prefill(e: *Engine, seq: *st.Seq, prompt: []const u32) !void {
+        return e.prefillRows(seq, prompt, null);
+    }
+
+    /// `prefill`, every row's final normed state also written to `rows` (prompt.len x hidden bf16) for a draft head.
+    pub fn prefillRows(e: *Engine, seq: *st.Seq, prompt: []const u32, rows: ?u64) !void {
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len >= seq.capacity) return error.PromptTooLong;
         try seq.reset(e.ops(), e.w.g);
@@ -85,6 +90,7 @@ pub const Engine = struct {
         const n = (prompt.len + prompt_rows - 1) / prompt_rows;
         for (0..n) |j| {
             const b = chunkBounds(0, prompt.len, prompt_rows, j);
+            f.every = if (rows) |r| r + b[0] * e.w.g.hidden * 2 else null;
             try f.chunk(prompt[b[0]..b[1]], seq, j == n - 1);
         }
     }

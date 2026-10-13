@@ -13,6 +13,7 @@ const dr = @import("draft.zig");
 const drafts = @import("drafts.zig");
 const lone = @import("lone.zig");
 const trees = @import("tree.zig");
+const features = @import("features.zig");
 const be = lanes.backend;
 
 /// The row counts calibrate times (calibration_rows without the tile steps a GB10 skips), to 16 a stream.
@@ -44,6 +45,7 @@ pub const Cuda = struct {
     drafting: std.AutoHashMapUnmanaged(*lanes.Stream, *drafts.Stream) = .empty,
     costs: [calibration.len + 1]lanes.config.Cost = undefined, // the forward's ms by a round's rows (calibrate)
     cost_count: usize = 0,
+    held: features.Held = .{}, // a head's inputs: the prompts' normed rows until each stream's first verify
     shared_prompts: bool = true, // false: every prompt runs alone through prefill, the pass the Qwen3.6 MoE is checked on
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: u32) !Cuda {
@@ -71,6 +73,7 @@ pub const Cuda = struct {
             x.gpa.destroy(ds.*);
         }
         x.drafting.deinit(x.gpa);
+        x.held.deinit(x.gpa);
         x.gpa.free(x.logits);
         x.gpa.free(x.cand_values);
         x.gpa.free(x.cand_ids);
@@ -130,7 +133,7 @@ pub const Cuda = struct {
         x.cost_count = n;
     }
 
-    const table: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany };
+    const table: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany, .prepare_features = prepareFeatures, .features = rowsOf };
     const table_alone: be.Backend.VTable = blk: {
         var t = table;
         t.prefill_many = null;
@@ -157,7 +160,7 @@ pub const Cuda = struct {
         return @ptrCast(@alignCast(p));
     }
 
-    fn seqOf(x: *Cuda, s: *lanes.Stream) !*st.Seq {
+    pub fn seqOf(x: *Cuda, s: *lanes.Stream) !*st.Seq {
         return x.seqs.get(s) orelse error.UnknownQwenStream;
     }
 
@@ -236,6 +239,10 @@ pub const Cuda = struct {
 
     /// prefill_state into an opened stream: the prompt in chunks, a drafting stream's last window of taps absorbed.
     fn prefillOpened(x: *Cuda, s: *lanes.Stream, seq: *st.Seq) !void {
+        if (x.held.on and s.drafts) {
+            const ids = s.prompt();
+            return x.e.prefillRows(seq, ids, try x.held.make(x.gpa, x.e.ctx.d, s, ids.len * x.e.w.g.hidden * 2));
+        }
         if (x.drafter) |d| if (s.drafts) {
             const ds = try x.draftingOf(s);
             return lone.prefill(x.e, seq, &ds.ctx, d, s.prompt());
@@ -321,7 +328,8 @@ pub const Cuda = struct {
         if (g > 0) try d.absorbMany(group[0..g], x.e.scratch.taps + g_from * row);
     }
 
-    fn dropSeq(x: *Cuda, s: *lanes.Stream) void {
+    pub fn dropSeq(x: *Cuda, s: *lanes.Stream) void {
+        x.held.drop(s);
         if (x.seqs.fetchRemove(s)) |entry| {
             entry.value.deinit();
             x.gpa.destroy(entry.value);
@@ -366,6 +374,7 @@ pub const Cuda = struct {
         const x = cast(p);
         if (windows.len != out.len or windows.len == 0 or windows.len > st.max_streams) return error.InvalidQwenWindows;
         try x.settle();
+        for (windows) |w| x.held.drop(w.stream); // the head has read the prompt's rows by the first verify
         const pend = &x.pending;
         var total: usize = 0;
         for (windows, out, 0..) |w, o, k| {
@@ -502,8 +511,27 @@ pub const Cuda = struct {
         return true;
     }
 
+    fn prepareFeatures(p: *anyopaque, taps: []const u32) !void {
+        return cast(p).held.prepare(taps);
+    }
+
+    /// A head's rows: the prompt's final normed rows, else the kept rows of the last verify (rows of its logits' norm).
+    fn rowsOf(p: *anyopaque, s: *lanes.Stream, _: []const u32, start: u64, count: u32) !be.Features {
+        const x = cast(p);
+        const row: u32 = @intCast(x.e.w.g.hidden * 2);
+        if (try x.held.prompt(s, start, count, row)) |f| return f;
+        const pend = &x.pending;
+        const k = for (pend.streams[0..pend.n], 0..) |t, k| {
+            if (t == s) break k;
+        } else return error.UnknownQwenStream;
+        const seq = pend.parts[k].seq;
+        if (start < seq.pos or start + count > seq.pos + pend.parts[k].tokens.len) return error.FeatureRowsPastWindow;
+        return .{ .buffer = x.e.scratch.last_h, .offset = (pend.starts[k] + start - seq.pos) * row, .rows = count, .row_bytes = row, .space = .device, .dtype = .bf16 };
+    }
+
     fn release(p: *anyopaque, s: *lanes.Stream) void {
         const x = cast(p);
+        x.held.drop(s);
         x.settle() catch |err| std.log.err("committing the last round before a release: {s}", .{@errorName(err)});
         if (x.seqs.fetchRemove(s)) |entry| {
             entry.value.deinit();

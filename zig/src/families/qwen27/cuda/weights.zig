@@ -126,10 +126,17 @@ pub const Loader = struct {
         var parts: [3]Tensor = undefined;
         var buf: [192]u8 = undefined;
         for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |s, i| parts[i] = try ck.get(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, s }));
+        if (parts[0].dtype != .u32 or parts[1].dtype != .bf16 or parts[2].dtype != .bf16) return error.UnsupportedQuantization;
+        return L.tileTensors(parts, name, n, k);
+    }
+
+    /// `tile` of tensors already read: MLX words (n, k/8), scales and biases (n, k/64), `name` for messages.
+    pub fn tileTensors(L: *Loader, parts: [3]Tensor, name: []const u8, n: usize, k: usize) !QLinear {
+        const words: @TypeOf(parts[0].dtype) = if (parts[0].dtype == .i32) .u32 else parts[0].dtype; // MLX words as stored, or viewed as int32
+        if (words != .u32 or parts[1].dtype != .bf16 or parts[2].dtype != .bf16) return error.UnsupportedQuantization;
         const k8 = k / 8;
         const kg = k / 64;
-        if (parts[0].dtype != .u32 or parts[1].dtype != .bf16 or parts[2].dtype != .bf16) return error.UnsupportedQuantization;
-        if (!parts[0].is(.u32, &.{ n, k8 }) or !parts[1].is(.bf16, &.{ n, kg }) or !parts[2].is(.bf16, &.{ n, kg })) {
+        if (!parts[0].is(parts[0].dtype, &.{ n, k8 }) or !parts[1].is(.bf16, &.{ n, kg }) or !parts[2].is(.bf16, &.{ n, kg })) {
             std.log.err("{s}: not a 4-bit group-64 ({d}, {d}) projection", .{ name, n, k });
             return error.UnexpectedTensor;
         }

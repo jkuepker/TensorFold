@@ -23,6 +23,7 @@ pub const Forward = struct {
     taps: ?u64 = null, // rows of the drafter's five layer taps (5 x hidden bf16), written by round and chunk
     hooks: ?Hooks = null, // a family's MLP in place of the dense one, and a look at every norm
     norms: usize = 0, // the pass's norm calls so far, as the hooks number them (the caller resets it a pass)
+    every: ?u64 = null, // a prompt chunk's final normed rows (W x hidden bf16) for a draft head, written by chunk
 
     /// What a family or a test plugs into the layer loop: its MLP (rows `y` normed with sums `xs` in, bf16 rows out) and a look at each norm's rows.
     pub const Hooks = struct {
@@ -310,6 +311,10 @@ pub const Forward = struct {
             try f.tapLayer(i, x, W);
         }
         seq.pos = p0 + W;
+        if (f.every) |rows| {
+            const other = if (x == s.x) s.h else s.x;
+            try f.t.addRmsnorm(x, pending.?, w.norm, other, rows, s.xs, W, g_.hidden, c.eps);
+        }
         if (!last) return;
         const at = (W - 1) * g_.hidden * bf;
         const spare = if (x == s.x) s.h else s.x;
