@@ -9,6 +9,7 @@ pub const Facts = struct {
     prior: []const f64 = &.{}, // acceptance by depth until a stream has its own
     plain_guard: bool = true, // plain rounds compete with drafted depths (the rule may choose no drafts)
     batched: bool = false, // hold() runs a shared round's streams as one batch
+    stops: bool = false, // hold() ends a chain by its own rule, so the round loop asks for the most and reads the count back (held_count)
     stream_bytes: usize = 0, // device bytes each opened stream holds (its caches), for memory admission
 };
 
@@ -32,6 +33,8 @@ pub const Drafter = struct {
         hold: *const fn (ptr: *anyopaque, items: []const Hold) anyerror!void,
         /// Each stream's held drafts on the host: out[i] gets streams[i]'s first out[i].len (error if it holds fewer).
         held: *const fn (ptr: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void,
+        /// Drafts the last hold() kept for the stream (a drafter whose chains end early; null: as many as asked).
+        held_count: ?*const fn (ptr: *anyopaque, s: *Stream) ?u32 = null,
         /// The stream left the rounds (only called for an opened stream).
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };
@@ -53,6 +56,10 @@ pub const Drafter = struct {
     }
     pub fn held(d: Drafter, streams: []const *Stream, out: []const []u32) !void {
         return d.vtable.held(d.ptr, streams, out);
+    }
+    pub fn heldCount(d: Drafter, s: *Stream) ?u32 {
+        const count = d.vtable.held_count orelse return null;
+        return count(d.ptr, s);
     }
     pub fn release(d: Drafter, s: *Stream) void {
         d.vtable.release(d.ptr, s);

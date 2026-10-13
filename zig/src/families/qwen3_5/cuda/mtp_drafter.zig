@@ -10,6 +10,11 @@ const dr = lanes.drafter;
 const bf = 2;
 /// MTP drafts a round at most (cuda.mtp DEPTH).
 pub const depth = 3;
+/// A chain ends after a draft the head gives less probability than this (cuda.mtp CONFIDENCE).
+pub const confidence: f32 = 0.3;
+
+/// A drawn draft and its temperature-1 probability under the head's row.
+const Pick = struct { token: u32, prob: f32 };
 
 /// One stream's head state: its cache, and the chain it holds for its next verify.
 const Lane = struct {
@@ -27,6 +32,8 @@ pub const Drafter = struct {
     cand_ids: []i64 = &.{},
     values: []f64 = &.{},
     row: []u16 = &.{},
+    stats_mod: ?cuda.Module = null, // qwen_route.cu's row-stats kernel
+    stats_fn: cuda.Function = undefined,
 
     /// Takes the head; times one chain step for the depth rule.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, head: *mtp.Head) !Drafter {
@@ -36,6 +43,8 @@ pub const Drafter = struct {
         d.cand_ids = try gpa.alloc(i64, q.state.max_candidates);
         d.values = try gpa.alloc(f64, q.state.max_candidates);
         d.row = try gpa.alloc(u16, head.w.ids.len);
+        d.stats_mod = try cuda.Module.load(head.e.ctx.d, cuda.kernels.qwen_route);
+        d.stats_fn = try d.stats_mod.?.function("tf_qwen_row_stats");
         d.step_ms = try d.time(io);
         return d;
     }
@@ -51,10 +60,11 @@ pub const Drafter = struct {
         d.gpa.free(d.cand_ids);
         d.gpa.free(d.values);
         d.gpa.free(d.row);
+        if (d.stats_mod) |*m| m.unload();
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = taps, .facts = facts, .open = open, .absorb = absorb, .hold = hold, .held = held, .release = release } };
+        return .{ .ptr = d, .vtable = &.{ .taps = taps, .facts = facts, .open = open, .absorb = absorb, .hold = hold, .held = held, .held_count = heldCount, .release = release } };
     }
 
     /// A chain step's cost: one row through the head, the draft head and a draw, median of five.
@@ -71,7 +81,7 @@ pub const Drafter = struct {
             const t0 = clock.now(io).toNanoseconds();
             try d.head.forward(&cache, cache.last, &.{0}, 0);
             try d.head.scoresOf(d.head.normed);
-            _ = try d.draw(null, 1);
+            _ = try d.draw(null, 1, true);
             if (rep > 0) times[rep - 1] = @as(f64, @floatFromInt(clock.now(io).toNanoseconds() - t0)) / 1e6;
         }
         std.mem.sort(f64, &times, {}, std.sort.asc(f64));
@@ -90,7 +100,7 @@ pub const Drafter = struct {
 
     fn facts(p: *anyopaque) dr.Facts {
         const d = self(p);
-        return .{ .depth = depth, .step_ms = d.step_ms, .stream_bytes = mtp.Cache.bytes(d.head.e.w.g, d.head.e.context) };
+        return .{ .depth = depth, .stops = true, .step_ms = d.step_ms, .stream_bytes = mtp.Cache.bytes(d.head.e.w.g, d.head.e.context) };
     }
 
     fn open(p: *anyopaque, s: *lanes.Stream) anyerror!void {
@@ -141,8 +151,24 @@ pub const Drafter = struct {
         }
     }
 
-    /// The target's draw rule on the head's logits, mapped to a token (decode.draft): the greedy column, or a keyed draw.
-    fn draw(d: *Drafter, rule: ?lanes.Sampling, position: u64) !u32 {
+    /// The head's row maximum and exp-sum into the pick buffer's words 1 and 2 (torch.softmax's float32 normalizer).
+    fn rowStats(d: *Drafter) !void {
+        const h = d.head;
+        var a: cuda.Args = .{};
+        a.add(h.logits);
+        a.add(@as(c_int, @intCast(h.w.ids.len)));
+        a.add(h.pick + 4);
+        const f = h.e.forward();
+        try cuda.launch.launch(d.stats_fn, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, f.ops.s, &a);
+    }
+
+    /// Probability of a logit under the row's stats: exp(x - max) / sum, as torch.softmax in float32.
+    fn probOf(x: f32, stats: [2]f32) f32 {
+        return @exp(x - stats[0]) / stats[1];
+    }
+
+    /// The target's draw rule on the head's logits, mapped to a token (decode.draft): the greedy column, or a keyed draw; with its probability if `more` (a chain goes on by it).
+    fn draw(d: *Drafter, rule: ?lanes.Sampling, position: u64, more: bool) !Pick {
         const h = d.head;
         const ids = h.w.ids;
         const f = h.e.forward();
@@ -151,28 +177,36 @@ pub const Drafter = struct {
         const sampled = if (rule) |r| r.temperature > 0 else false;
         if (!sampled) {
             try f.ops.argmax(h.logits, n, n, h.pick, 1);
-            var col: [1]u32 = undefined;
-            try f.ops.download(std.mem.sliceAsBytes(&col), h.pick);
+            if (more) try d.rowStats();
+            var out: [3]u32 = .{ 0, 0, @bitCast(@as(f32, 1.0)) };
+            try f.ops.download(std.mem.sliceAsBytes(out[0 .. if (more) 3 else 1]), h.pick);
             try f.ops.s.synchronize();
-            return ids[col[0]];
+            return .{ .token = ids[out[0]], .prob = if (more) 1.0 / @as(f32, @bitCast(out[2])) else 0 };
         }
         const r = rule.?;
         const want = if (r.top_k != 0) @min(n, @as(usize, r.top_k) + 8) else 0;
+        var stats: [2]f32 = .{ 0, 1 };
         if (want > 0 and want <= q.state.max_candidates) {
             const t = f.ops.torch();
             try t.toF32(h.logits, s.logits32, n);
             try t.topk(s.logits32, n, 1, want, s.cand_values, s.cand_ids, s.topk_scratch);
+            if (more) try d.rowStats();
             try f.ops.download(std.mem.sliceAsBytes(d.cand_values[0..want]), s.cand_values);
             try f.ops.download(std.mem.sliceAsBytes(d.cand_ids[0..want]), s.cand_ids);
+            if (more) try f.ops.download(std.mem.sliceAsBytes(&stats), h.pick + 4);
             try f.ops.s.synchronize();
             var tokens: [q.state.max_candidates]u64 = undefined;
             for (d.values[0..want], d.cand_values[0..want], tokens[0..want], d.cand_ids[0..want]) |*v, x, *tok, col| {
                 v.* = x;
                 tok.* = ids[@intCast(col)];
             }
-            return @intCast(try lanes.sampling.choose(d.gpa, d.values[0..want], tokens[0..want], position, r));
+            const token = try lanes.sampling.choose(d.gpa, d.values[0..want], tokens[0..want], position, r);
+            const at = std.mem.indexOfScalar(u64, tokens[0..want], token).?;
+            return .{ .token = @intCast(token), .prob = probOf(d.cand_values[at], stats) };
         }
+        if (more) try d.rowStats();
         try f.ops.download(std.mem.sliceAsBytes(d.row), h.logits);
+        if (more) try f.ops.download(std.mem.sliceAsBytes(&stats), h.pick + 4);
         try f.ops.s.synchronize();
         const values = try d.gpa.alloc(f64, n);
         defer d.gpa.free(values);
@@ -182,7 +216,9 @@ pub const Drafter = struct {
             v.* = @as(f32, @bitCast(@as(u32, w) << 16));
             tok.* = id;
         }
-        return @intCast(try lanes.sampling.choose(d.gpa, values, tokens, position, r));
+        const token = try lanes.sampling.choose(d.gpa, values, tokens, position, r);
+        const at = std.mem.indexOfScalar(u64, tokens, token).?;
+        return .{ .token = @intCast(token), .prob = probOf(@floatCast(values[at]), stats) };
     }
 
     /// Each stream's chain: the first draft from the absorbed row, the rest from the head's own outputs.
@@ -192,14 +228,23 @@ pub const Drafter = struct {
             const l = d.lanes.get(it.stream) orelse return error.NotDrafting;
             const n = @min(it.depth, depth);
             try d.head.scoresOf(l.cache.last);
-            l.tokens[0] = try d.draw(it.stream.sampling, it.position);
-            for (1..n) |j| {
+            var pick = try d.draw(it.stream.sampling, it.position, n > 1);
+            l.tokens[0] = pick.token;
+            var j: usize = 1;
+            // the chain goes on while the last draft was confident (decode.mtp_round)
+            while (j < n and @as(f64, pick.prob) >= confidence) : (j += 1) {
                 try d.call(l, l.cache.last, l.tokens[j - 1 ..][0..1], l.cache.pos + j - 1);
                 try d.head.scoresOf(l.cache.last);
-                l.tokens[j] = try d.draw(it.stream.sampling, it.position + j);
+                pick = try d.draw(it.stream.sampling, it.position + j, j + 1 < n);
+                l.tokens[j] = pick.token;
             }
-            l.count = n;
+            l.count = j;
         }
+    }
+
+    fn heldCount(p: *anyopaque, s: *lanes.Stream) ?u32 {
+        const l = self(p).lanes.get(s) orelse return null;
+        return @intCast(l.count);
     }
 
     fn held(p: *anyopaque, streams: []const *lanes.Stream, out: []const []u32) anyerror!void {

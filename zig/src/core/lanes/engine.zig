@@ -61,6 +61,7 @@ pub const Engine = struct {
                 .node_probabilities = cfg.node_probabilities,
                 .batch_rows = cfg.batch_rows,
                 .batched_heads = cfg.draft_streams,
+                .chain_stops = cfg.draft_stops,
             },
         };
     }
@@ -453,7 +454,10 @@ pub const Engine = struct {
                 r.stream.lanes = l;
                 lone = null;
             } else if (e.backend.vtable.tree) |tree| {
-                if (try tree(e.backend.ptr, r.stream, e.gpa)) |held| r.stream.next = held;
+                if (try tree(e.backend.ptr, r.stream, e.gpa)) |held| {
+                    r.stream.next = held;
+                    if (held.tokens == null) r.stream.held_levels = held.count; // a head that ended its chain early
+                }
             }
         }
     }
