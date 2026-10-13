@@ -28,7 +28,7 @@ const lane_widths = [_]usize{ 1, 2, 3, 4, 8, 16 };
 const zero_tokens: [128]u32 = @splat(0);
 
 const Kind = enum { chain, bushy };
-const Spec = struct { p: usize, w: usize, kind: Kind = .chain };
+const Spec = struct { p: usize, w: usize, kind: Kind = .chain, k: u8 = 0, v: u8 = 0 }; // k, v: the caches start 8 elements times these past the stream's first rows
 
 fn bf16(v: f32) u16 {
     const u: u32 = @bitCast(v);
@@ -51,6 +51,7 @@ const Rig = struct {
     k: *kern.Kernels,
     scratch: *st.Scratch,
     seqs: []st.Seq,
+    home: [st.max_streams][2]u64, // each stream's attention-layer key and value caches as the arena gave them
     pool: [2][2]cuda.DeviceBuffer, // pristine keys and values: normal, heavy tail
     q: cuda.DeviceBuffer,
     kn: cuda.DeviceBuffer,
@@ -94,16 +95,18 @@ const Rig = struct {
         try b.l.fill8(0xff, r.s.handle);
     }
 
-    // Each stream's caches: the pristine rows below its committed length, NaN words above.
+    // Each stream's caches (OFF a multiple of 8 elements): the pristine rows below its committed length, NaN words above.
     fn load(r: *Rig, specs: []const Spec, pool: usize) !void {
         const o = r.ops();
         for (specs, 0..) |sp, i| {
             const seq = &r.seqs[i];
             seq.pos = sp.p;
+            seq.keys[3] = r.home[i][0] + @as(u64, sp.k) * 16;
+            seq.values[3] = r.home[i][1] + @as(u64, sp.v) * 16;
             const slack = i * 4096 * 2;
             for ([_]struct { dst: u64, src: cuda.DeviceBuffer }{ .{ .dst = seq.keys[3], .src = r.pool[pool][0] }, .{ .dst = seq.values[3], .src = r.pool[pool][1] } }) |c| {
                 try o.copy(c.dst, c.src.ptr + slack, sp.p * kv_row * 2);
-                try o.fill32(c.dst + sp.p * kv_row * 2, nan_words, (capacity - sp.p) * kv_row / 2);
+                try o.fill32(c.dst + sp.p * kv_row * 2, nan_words, (capacity - 128 - sp.p) * kv_row / 2); // the 128 spare positions hold the shift
             }
         }
     }
@@ -224,8 +227,9 @@ fn grid(rig: *Rig) void {
     var n: usize = 0;
     for (committed) |p| for (widths) |w| {
         if (p + w > capacity) continue;
-        run1(rig, &.{.{ .p = p, .w = w }}, n % 4 / 3); // every fourth on the heavy-tail pool
-        run1(rig, &.{.{ .p = p, .w = w, .kind = .bushy }}, 0);
+        const shift: u8 = @intCast(n % 5);
+        run1(rig, &.{.{ .p = p, .w = w, .k = shift, .v = (shift * 3) % 5 }}, n % 4 / 3); // every fourth on the heavy-tail pool
+        run1(rig, &.{.{ .p = p, .w = w, .kind = .bushy, .k = (shift + 2) % 5, .v = shift }}, 0);
         n += 1;
     };
 }
@@ -235,7 +239,7 @@ fn lanes(rig: *Rig, count: usize) void {
     var specs: [16]Spec = undefined;
     for (0..count) |_| {
         const s = 2 + rng.uintLessThan(usize, 15);
-        for (specs[0..s]) |*sp| sp.* = .{ .p = committed[rng.uintLessThan(usize, committed.len)], .w = lane_widths[rng.uintLessThan(usize, lane_widths.len)], .kind = if (rng.boolean()) .chain else .bushy };
+        for (specs[0..s]) |*sp| sp.* = .{ .p = committed[rng.uintLessThan(usize, committed.len)], .w = lane_widths[rng.uintLessThan(usize, lane_widths.len)], .kind = if (rng.boolean()) .chain else .bushy, .k = rng.uintLessThan(u8, 5), .v = rng.uintLessThan(u8, 5) };
         run1(rig, specs[0..s], rng.uintLessThan(usize, 2));
     }
 }
@@ -388,6 +392,7 @@ pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
         .k = &k,
         .scratch = &scratch,
         .seqs = seqs,
+        .home = undefined,
         .pool = undefined,
         .q = try cuda.DeviceBuffer.alloc(gpu.d, 16),
         .kn = try cuda.DeviceBuffer.alloc(gpu.d, 16),
@@ -399,6 +404,7 @@ pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
         .covered = try gpa.alloc(bool, k.triton.variants.len),
     };
     @memset(rig.covered, false);
+    for (seqs, &rig.home) |sq, *h| h.* = .{ sq.keys[3], sq.values[3] };
     defer gpa.free(rig.covered);
     defer rig.nat.deinit();
     for (&rig.part) |*b| b.* = .{ .o = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * D * 4), .m = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4), .l = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4) };
