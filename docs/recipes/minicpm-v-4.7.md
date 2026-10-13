@@ -43,6 +43,23 @@ hf download TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP mtp-4bit.safetensors      # 
 
 Without one it refuses to start unless `--no-drafts` is given.
 
+## Install
+
+This family is on the `minicpmv47-066` branch of the [jkuepker/TensorFold](https://github.com/jkuepker/TensorFold) fork,
+built on the 0.6.6 release (the Python CUDA engine). On a DGX Spark, run it in NVIDIA's PyTorch container, which already
+has every dependency:
+
+```bash
+docker run -d --name tensorfold --gpus all --ipc=host --network host --ulimit memlock=-1 \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/models:/models \
+  nvcr.io/nvidia/pytorch:26.07-py3 sleep infinity
+docker exec tensorfold pip install --no-deps "git+https://github.com/jkuepker/TensorFold@minicpmv47-066"
+```
+
+Run the commands below with `docker exec -it tensorfold` and the checkpoint under `/models`. The first start builds
+the CUDA kernels (about 30 s).
+
 ## Serve
 
 ```bash
