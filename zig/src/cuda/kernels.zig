@@ -32,6 +32,7 @@ pub const nvfp4_experts: []const u8 = if (available) &Blob("fatbin_nvfp4_experts
 pub const qwen_ops: []const u8 = if (available) &Blob("fatbin_qwen_ops").bytes else &.{};
 pub const qwen_route: []const u8 = if (available) &Blob("fatbin_qwen_route").bytes else &.{};
 pub const qwen_glue: []const u8 = if (available) &Blob("fatbin_qwen_glue").bytes else &.{};
+pub const qwen_prep: []const u8 = if (available) &Blob("fatbin_qwen_prep").bytes else &.{};
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
 pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};

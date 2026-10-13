@@ -3,6 +3,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const glue_native = @import("glue_native.zig");
+const prep_native = @import("prep_native.zig");
+const triton_glue = @import("triton.zig");
 pub const torch_ops = @import("nemotron").torch_ops;
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
@@ -56,6 +58,7 @@ pub const Kernels = struct {
     mods: [15]cuda.Module,
     triton: cuda.aot.Set,
     glue: ?glue_native.Native, // the built-in row glue (null off GB10)
+    prep: ?prep_native.Native, // qwen_prep.cu where the GPU is the one it was verified on
     group: cuda.Function,
     wide: [wide.len]cuda.Function, // tiles 3-5: rows <= 32, <= 64, more
     gemv: cuda.Function,
@@ -133,11 +136,18 @@ pub const Kernels = struct {
         k.gemv_rows = 0; // a GB10 runs the 27B's projections faster in Python's clusters, 1 to 16 rows alike
         if (std.c.getenv("TF_QWEN27_GEMV_ROWS")) |v| k.gemv_rows = std.fmt.parseInt(usize, std.mem.span(v), 10) catch k.gemv_rows;
         k.chip = .{ major, minor, @intCast(sms) };
+        k.prep = prep_native.Native.load(d, @intCast(major * 10 + minor)) catch null;
         return k;
+    }
+
+    /// The Triton glue launches on `s`: native prep kernels where they were verified, the captured cubins otherwise.
+    pub fn tri(k: *Kernels, s: cuda.Stream) triton_glue.Tri {
+        return .{ .set = &k.triton, .s = s, .glue = if (k.glue) |*g| g else null, .prep = if (k.prep) |*n| n else null };
     }
 
     pub fn deinit(k: *Kernels) void {
         if (k.glue) |*g| g.deinit();
+        if (k.prep) |*n| n.deinit();
         k.triton.deinit();
         for (&k.mods) |*m| m.unload();
     }

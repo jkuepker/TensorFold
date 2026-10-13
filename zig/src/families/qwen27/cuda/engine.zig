@@ -71,7 +71,7 @@ pub const Engine = struct {
     }
 
     pub fn forward(e: *Engine) Forward {
-        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .set = &e.k.triton, .s = e.s, .native = if (e.k.glue) |*g| g else null }, .s = &e.scratch, .hooks = e.hooks };
+        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = e.k.tri(e.s), .s = &e.scratch, .hooks = e.hooks };
     }
 
     /// A stream's state for `capacity` positions (its caches, recurrences and conv windows), empty.

@@ -75,6 +75,14 @@ off, thinking off): six chat requests with their prompt ids, greedy reply ids an
 (`minicpmv4_7`) answers it token for token, drafted and with `--draft-off`, alone and with two clients at once:
 `serve_check.py check URL ../minicpm/fixture.json [--draft-off]`. It uses the same captured kernel set as Qwen3.6.
 
+## Native prep kernels
+
+`qwen_prep.cu` runs `glue.gdn_pre` and `glue.attn_prep` (the conv, SiLU, q/k norms, g and beta; the q/k norms and rotary) without the
+captured cubins, on GB10 and for the shapes in `prep_native.zig` (`gdnFits`, `attnFits`). `tf-cuda-test qwen-prep <kernel set>` runs every
+`_gdn_pre` and `_attn_prep` entry of the set (each pointer alignment and MULTI form) against the native kernel on synthetic rows of
+1 to 4096 (saturating sigmoid and softplus inputs, positions up to 2^30 for the sin and cos argument reduction), whole outputs and guard
+bytes byte for byte. `qwen36-layers`, `qwen36-mtp` and the serve checks must pass on a kernel set with those entries removed from `aot.json`.
+
 ## Programmatic dependent launch
 
 Each plain launch on the stream leaves the GPU about 2 us idle before the next kernel starts; a kernel launched with

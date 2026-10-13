@@ -17,6 +17,7 @@ const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const qwen35_router_tests = @import("qwen35_router_tests.zig");
 const qwen_glue_tests = @import("qwen_glue_tests.zig");
+const qwen_prep_tests = @import("qwen_prep_tests.zig");
 const qwen36_tests = @import("qwen36_tests.zig");
 const qwen36_mtp_tests = @import("qwen36_mtp_tests.zig");
 const qmm_group_tests = @import("qmm_group_tests.zig");
@@ -65,6 +66,7 @@ const usage =
     \\  qwen36-layers MODEL <aot> <oracle> [PROMPTS] [--teacher] [--steps N] Qwen3.6 engine vs the Python dumps (qwen36/capture.py), byte for byte
     \\  qwen-glue <aot> [oracle] Qwen3.6 row glue (add_rmsnorm, gated_norm, gate_mul, group_sums, paths, embed): built-in kernels vs the captured Triton launches, every output byte
     \\  qwen35-router <aot> <dir> [rounds] Qwen3.6 router: Triton replay vs Python bytes (qwen35/capture_router.py), native vs both
+    \\  qwen-prep <aot>           Qwen3.6 gdn_pre and attn_prep: native vs every captured Triton variant, byte for byte (synthetic rows)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
@@ -166,6 +168,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     }
     if (std.mem.eql(u8, cmd, "qwen-glue")) return qwen_glue_tests.run(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else null);
     if (std.mem.eql(u8, cmd, "qwen35-router")) return qwen35_router_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 240);
+    if (std.mem.eql(u8, cmd, "qwen-prep")) return qwen_prep_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "carveout")) {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
