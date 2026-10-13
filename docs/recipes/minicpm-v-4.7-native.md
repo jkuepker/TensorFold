@@ -110,35 +110,49 @@ streamed, newlines in a plain answer) passes 3 of 3 on the drafted server.
 
 ## Measurements
 
-One DGX Spark (GB10) with a vLLM server of about 64 GB resident beside it, thinking off, drafts on unless the row says
-otherwise, `localeval speed --thinking off --concurrency 2` (3 reps of 128 forced tokens, median). The native server ran
-`--parallel 2 --context 49152`. Decode tok/s at the prompt length of the column; the 2-stream figure is the aggregate of
-two streams at 1k; prefill is the 16k row's uncached prefill tok/s.
+One DGX Spark (GB10) held exclusively (the vLLM server of about 64 GB resident beside it), thinking off,
+drafts on unless the row says otherwise, `localeval speed --thinking off --concurrency 2` (3 reps of 128 forced tokens,
+median). The native server ran `--parallel 2 --context 49152`, built with nvcc 13.3, with the CUDA 13.3 compat `libcuda`
+on the loader path and the Triton set rebuilt by `aot_pdl.py` (see Toolkit and driver). Decode tok/s at the prompt length
+of the column; the 2-stream figure is the aggregate of two streams at 1k; prefill is the 16k row's uncached prefill
+tok/s. Each native row is the mean of two sweeps run back to back, because one sweep's decode spread was 10 to 30%.
 
 | | 0.1k | 1k | 4k | 16k | 2 streams | prefill @16k |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Native, MiniCPM, drafts | 130.5 | 123.7 | 112.4 | 109.6 | 133.2 | 5,479 |
-| Native, MiniCPM, `--no-drafts` | 80.7 | 77.6 | 76.4 | 70.0 | 106.1 | 6,774 |
-| Native, stock Qwen3.6, drafts | 137.5 | 118.9 | 141.6 | 127.0 | 131.7 | 5,386 |
+| Native, MiniCPM, drafts | 147.4 | 149.2 | 142.3 | 132.8 | 148.6 | 5,343 |
+| Native, MiniCPM, `--no-drafts` | 89.6 | 87.3 | 86.0 | 78.3 | 114.5 | 6,712 |
+| Native, stock Qwen3.6, drafts | 144.4 | 155.7 | 164.3 | 147.7 | 148.3 | 5,238 |
 | Python 0.6.6, MiniCPM, drafts | 154.8 | 153.2 | 147.6 | 142.1 | 119.6 | 6,599 |
 | Python 0.6.6, MiniCPM, serial | 92.1 | 89.7 | 87.5 | 79.6 | 80.9 | 7,033 |
 | vLLM, NVFP4 W4A16 (attention, lm_head), Marlin | 99.4 | 102.5 | 101.3 | 93.1 | 115.1 | - |
 
-The native rows are localeval runs `20261013-135101-adhoc-excl-native-minicpmv47-drafted`,
-`20261013-135152-adhoc-excl-native-minicpmv47-nodrafts` and `20261013-134951-adhoc-excl-native-qwen36-drafted`, taken
-with the Spark held exclusively; the Python rows are `20261013-005703-adhoc-tf-minicpmv47-mlx4-qwenmtp` and
-`20261013-012144-adhoc-tf-minicpmv47-mlx4-serial`, and vLLM's are from the Python recipe's table. Decode spread between
-reps is 14 to 22% on the drafted rows and one Qwen3.6 rep at 1k ran at 363 tok/s (that row's median is 118.9), so
-differences under 10% are noise. A first, non-exclusive pass of the same three sweeps
-(`20261013-132839-adhoc-native-minicpmv47-drafted`, `20261013-132700-adhoc-native-qwen36-drafted`) gave MiniCPM drafted
-118.0, 127.1, 117.9, 107.9 and 138.5.
+The two sweeps behind each native row, 0.1k / 1k / 4k / 16k / 2 streams: MiniCPM drafts
+`20261013-180041-adhoc-final-native-minicpmv47-drafted` (135.8, 146.3, 147.7, 131.4, 146.3) and
+`20261013-180115-adhoc-final-native-minicpmv47-drafted-r2` (159.0, 152.1, 136.9, 134.2, 150.9); `--no-drafts`
+`20261013-180206-adhoc-final-native-minicpmv47-nodrafts` (89.7, 87.1, 86.4, 78.2, 112.1) and
+`20261013-180245-adhoc-final-native-minicpmv47-nodrafts-r2` (89.4, 87.4, 85.6, 78.3, 116.9); Qwen3.6 drafts
+`20261013-180359-adhoc-final-native-qwen36-drafted` (146.5, 153.2, 162.4, 145.0, 145.2) and
+`20261013-180430-adhoc-final-native-qwen36-drafted-r2` (142.3, 158.1, 166.2, 150.3, 151.4). The same MiniCPM drafted
+sweep on the stock build (nvcc 13.0, the stock `libcuda`, the unrebuilt Triton set), one run
+`20261013-180527-adhoc-final-native-minicpmv47-drafted-stockcfg`, gave 148.4, 145.2, 132.0, 129.8 and 154.8, inside the
+noise of the first, so the toolkit and driver settings are not separable from run-to-run spread at this sample size. The
+Python rows are `20261013-005703-adhoc-tf-minicpmv47-mlx4-qwenmtp` and `20261013-012144-adhoc-tf-minicpmv47-mlx4-serial`,
+and vLLM's are from the Python recipe's table (another day's run). The earlier native sweep of this recipe
+(`20261013-135101-adhoc-excl-native-minicpmv47-drafted`, `20261013-135152-adhoc-excl-native-minicpmv47-nodrafts`,
+`20261013-134951-adhoc-excl-native-qwen36-drafted`, before the fused projections, the draft rule and the programmatic
+dependent launch) gave MiniCPM drafts 130.5, 123.7, 112.4, 109.6 and 133.2, `--no-drafts` 80.7, 77.6, 76.4, 70.0 and
+106.1, and Qwen3.6 137.5, 118.9, 141.6, 127.0 and 131.7. Rep spread within a sweep is up to 30% on the drafted rows (one
+Qwen3.6 rep at 1k ran at 367 tok/s) and the median of a 3-rep sweep moves by 10% or more between runs, so a difference
+under about 10% is noise.
 
-Native drafted decode is at 76 to 84% of the Python engine's drafted decode in the four single-stream columns (and above
-it at two streams), native serial decode is at 87 to 88% of Python's serial decode, and native drafted decode is 1.5 to
-1.6 times its own serial decode. The native engine launches each op separately; the Python engine replays CUDA graphs.
-Against vLLM's NVFP4 server, which does not draft, native drafted decode is higher in every column (for example 109.6
-against 93.1 at 16k and 133.2 against 115.1 at two streams), and native serial decode is lower (70.0 against 93.1 at
-16k). The vLLM figures come from another day's run.
+Native drafted decode is at 93 to 97% of the Python engine's drafted decode in the four single-stream columns (and above
+it at two streams), native serial decode is at 97 to 98% of Python's serial decode, and native drafted decode is 1.6 to
+1.7 times its own serial decode. The native engine launches each op separately and the Python engine replays CUDA graphs;
+the fused projections, the 0.3 confidence rule for ending a draft chain (the same as Python 0.6.6's) and the dependent
+launches closed most of that gap, and what is left is about the spread between sweeps. Against vLLM's NVFP4 server, which does
+not draft, native drafted decode is higher in every column (for example 132.8 against 93.1 at 16k and 148.6 against
+115.1 at two streams), and native serial decode is lower (78.3 against 93.1 at 16k). The vLLM figures come from another
+day's run.
 
 Quality, `localeval quality --bench mmlu --limit 25 --max-tokens 2048 --judge none --thinking off`, 1,425 questions:
 
@@ -152,7 +166,7 @@ Quality, `localeval quality --bench mmlu --limit 25 --max-tokens 2048 --judge no
 
 - TODO: the expert kernels run about 8% longer a launch than the Python engine's identical SASS (gate/up 58.7 against
 54.0 us at one row); the allocator, module loading, nvcc and `libcuda` are not the cause.
-- TODO: CUDA graphs on the native engine (single-stream decode with drafts is 16 to 24% under the Python engine's).
+- TODO: CUDA graphs on the native engine (single-stream decode with drafts is 3 to 7% under the Python engine's).
 - TODO: images and `--vision` (upstream #598).
 - TODO: native GSM8K, IFEval and HumanEval, 32k and long-context code runs, memory at 262,144 tokens.
 - TODO: `--prefill-fp8`; the native prefill is bf16.
