@@ -83,7 +83,7 @@ class Qwen36Engine:
         self.w = load(model_dir, skip=skip)
         self.head = self.graphs = None
         if self.depth:
-            m = load_mtp(model_dir, self.w, path=mtp_path) if mtp_path is not None else None
+            m = load_mtp(model_dir, self.w, path=mtp_path)     # None: the side file, else the shards' mtp.*
             if m is None:
                 raise ValueError("this checkpoint has no MTP layer (mtp-4bit.safetensors), which the CUDA engine "
                                  "drafts with; add it, or pass --no-drafts for the serial reference")
