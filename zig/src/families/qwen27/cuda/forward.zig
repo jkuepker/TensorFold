@@ -21,6 +21,15 @@ pub const Forward = struct {
     s: *st.Scratch,
     dump: ?Dump = null, // a debugging copy of every norm's (h, y) rows, as capture.py's hook writes them
     taps: ?u64 = null, // rows of the drafter's five layer taps (5 x hidden bf16), written by round and chunk
+    hooks: ?Hooks = null, // a family's MLP in place of the dense one, and a look at every norm
+    norms: usize = 0, // the pass's norm calls so far, as the hooks number them (the caller resets it a pass)
+
+    /// What a family or a test plugs into the layer loop: its MLP (rows `y` normed with sums `xs` in, bf16 rows out) and a look at each norm's rows.
+    pub const Hooks = struct {
+        ctx: *anyopaque,
+        mlp: ?*const fn (ctx: *anyopaque, layer: usize, y: u64, xs: u64, rows: usize, prompt: bool, out: u64) anyerror!void = null,
+        norm: ?*const fn (ctx: *anyopaque, index: usize, h: u64, y: u64, xs: u64, rows: usize) anyerror!void = null,
+    };
 
     pub const Dump = struct { io: std.Io, dir: []const u8, n: usize = 0, rows: usize = 0 };
 
@@ -51,7 +60,20 @@ pub const Forward = struct {
         const out = if (r == null) x else if (x == f.s.x) f.s.h else f.s.x;
         try f.t.addRmsnorm(x, r, weight, out, f.s.y, f.s.xs, rows, f.g().hidden, c.eps);
         if (f.dump) |*d| try f.saveRows(d, out, f.s.y, rows);
+        try f.look(out, f.s.y, f.s.xs, rows);
         return out;
+    }
+
+    /// The hooks' look at a norm call's residual rows `h`, normed rows `y` and their sums `xs`.
+    fn look(f: *Forward, h: u64, y: u64, xs: u64, rows: usize) !void {
+        const hk = f.hooks orelse return;
+        defer f.norms += 1;
+        if (hk.norm) |n| try n(hk.ctx, f.norms, h, y, xs, rows);
+    }
+
+    fn mlpHook(f: *const Forward) ?Hooks {
+        const hk = f.hooks orelse return null;
+        return if (hk.mlp != null) hk else null;
     }
 
     /// Layer `i`'s tap, when the drafter reads it: (x + pending) of the call's rows into the taps buffer.
@@ -123,15 +145,20 @@ pub const Forward = struct {
                 },
             }
             x = try f.norm(x, s.r, layer.post_norm, W);
-            try f.ops.dense(s.y, s.xs, layer.gate, s.gate, W);
-            try f.ops.dense(s.y, s.xs, layer.up, s.up, W);
-            try f.t.swiglu(s.gate, s.up, s.act, s.act_xs, W, g_.intermediate);
-            try f.ops.dense(s.act, s.act_xs, layer.down, s.pending, W);
+            if (f.mlpHook()) |hk| {
+                try hk.mlp.?(hk.ctx, i, s.y, s.xs, W, false, s.pending);
+            } else {
+                try f.ops.dense(s.y, s.xs, layer.gate, s.gate, W);
+                try f.ops.dense(s.y, s.xs, layer.up, s.up, W);
+                try f.t.swiglu(s.gate, s.up, s.act, s.act_xs, W, g_.intermediate);
+                try f.ops.dense(s.act, s.act_xs, layer.down, s.pending, W);
+            }
             pending = s.pending;
             try f.tapLayer(i, x, W);
         }
         const spare = if (x == s.x) s.h else s.x;
         try f.t.addRmsnorm(x, pending, w.norm, spare, s.last_h, s.last_xs, W, g_.hidden, c.eps);
+        try f.look(spare, s.last_h, s.last_xs, W);
         if (f.dump) |*d| try f.saveRows(d, spare, s.last_h, W);
         try f.ops.dense(s.last_h, s.last_xs, w.head, s.logits, W);
     }
@@ -271,10 +298,14 @@ pub const Forward = struct {
                 },
             }
             x = try f.norm(x, s.r, layer.post_norm, W);
-            try f.ops.prefillDense(s.y, layer.gate, s.gate, W);
-            try f.ops.prefillDense(s.y, layer.up, s.up, W);
-            try f.t.swiglu(s.gate, s.up, s.act, s.act_xs, W, g_.intermediate);
-            try f.ops.prefillDense(s.act, layer.down, s.pending, W);
+            if (f.mlpHook()) |hk| {
+                try hk.mlp.?(hk.ctx, i, s.y, s.xs, W, true, s.pending);
+            } else {
+                try f.ops.prefillDense(s.y, layer.gate, s.gate, W);
+                try f.ops.prefillDense(s.y, layer.up, s.up, W);
+                try f.t.swiglu(s.gate, s.up, s.act, s.act_xs, W, g_.intermediate);
+                try f.ops.prefillDense(s.act, layer.down, s.pending, W);
+            }
             pending = s.pending;
             try f.tapLayer(i, x, W);
         }
@@ -283,6 +314,7 @@ pub const Forward = struct {
         const at = (W - 1) * g_.hidden * bf;
         const spare = if (x == s.x) s.h else s.x;
         try f.t.addRmsnorm(x + at, pending.? + at, w.norm, spare, seq.head_in, s.last_xs, 1, g_.hidden, c.eps);
+        try f.look(spare, seq.head_in, s.last_xs, 1);
         try f.t.groupSums(seq.head_in, seq.head_xs, g_.hidden, 1, g_.hidden);
     }
 
@@ -404,10 +436,14 @@ pub const Forward = struct {
                 },
             }
             x = try f.norm(x, s.r, layer.post_norm, W);
-            try f.ops.prefillDense(s.y, layer.gate, s.gate, W);
-            try f.ops.prefillDense(s.y, layer.up, s.up, W);
-            try f.t.swiglu(s.gate, s.up, s.act, s.act_xs, W, g_.intermediate);
-            try f.ops.prefillDense(s.act, layer.down, s.pending, W);
+            if (f.mlpHook()) |hk| {
+                try hk.mlp.?(hk.ctx, i, s.y, s.xs, W, true, s.pending);
+            } else {
+                try f.ops.prefillDense(s.y, layer.gate, s.gate, W);
+                try f.ops.prefillDense(s.y, layer.up, s.up, W);
+                try f.t.swiglu(s.gate, s.up, s.act, s.act_xs, W, g_.intermediate);
+                try f.ops.prefillDense(s.act, layer.down, s.pending, W);
+            }
             pending = s.pending;
             try f.tapLayer(i, x, W);
         }

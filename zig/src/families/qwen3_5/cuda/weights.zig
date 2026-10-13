@@ -127,5 +127,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir: []c
     try L.rotary();
     try L.settle();
     try w.names(g);
+    // the 27B's forward walks base.layers: these mixers and norms, its dense MLP unused under the MoE hook
+    w.base.layers = try gpa.alloc(w27.Layer, g.layers);
+    for (w.base.layers, w.layers) |*b, l| b.* = .{ .input_norm = l.input_norm, .post_norm = l.post_norm, .mixer = l.mixer, .gate = undefined, .up = undefined, .down = undefined };
     return w;
 }

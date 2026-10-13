@@ -137,7 +137,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("cuda", cuda);
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
-    runner.addImport("qwen35_router", qwen35Router(b, target, optimize, cuda));
+    runner.addImport("qwen27", mods.qwen27);
+    runner.addImport("qwen35_cuda", qwen35Cuda(b, target, optimize, cuda, mods.core, mods.qwen27));
     const exlr8 = exlr8_build.coreAlias(b, target, optimize, mods.core);
     runner.addImport("exlr8", exlr8);
     const exlr8_tests = exlr8_build.testModules(b, target, optimize, exlr8);
@@ -155,9 +156,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
-/// Qwen3.6's MoE router (zig/src/families/qwen3_5/cuda/router.zig): captured Triton launches and the native kernels.
-fn qwen35Router(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda/router.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} });
+/// Qwen3.5-family models on the GPU (zig/src/families/qwen3_5/cuda.zig): the MoE checkpoint's weights, router and experts.
+fn qwen35Cuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Module {
+    const gpu = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    gpu.addImport("cuda", cuda);
+    gpu.addImport("core", core);
+    gpu.addImport("qwen27", qwen27);
+    gpu.addImport("qwen35", qwen35Loader(b, target, optimize, core));
+    return gpu;
 }
 
 /// The Qwen3.5 / 3.6 host loader (zig/src/families/qwen3_5/loader.zig) over the core's quant formats and safetensors.
@@ -174,14 +180,9 @@ fn qwen35Index(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 /// `tf-qwen35-upload DIR`: a Qwen3.5-family MoE checkpoint on the GPU (qwen3_5/cuda.zig), its bytes reported.
 fn qwen35Upload(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Step.Compile {
-    const gpu = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    gpu.addImport("cuda", cuda);
-    gpu.addImport("core", core);
-    gpu.addImport("qwen27", qwen27);
-    gpu.addImport("qwen35", qwen35Loader(b, target, optimize, core));
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen35_upload.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
-    m.addImport("qwen35_cuda", gpu);
+    m.addImport("qwen35_cuda", qwen35Cuda(b, target, optimize, cuda, core, qwen27));
     return b.addExecutable(.{ .name = "tf-qwen35-upload", .root_module = m });
 }
 
@@ -253,7 +254,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&loader_tests.step);
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader_tests.step);
     step.dependOn(&qwen35Index(b, host, .debug, mods.core).step);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen35Router(b, host, .debug, cuda) })).step);
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen35Cuda(b, host, .debug, cuda, mods.core, mods.qwen27) })).step);
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.heat, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);

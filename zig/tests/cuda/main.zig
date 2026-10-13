@@ -15,6 +15,7 @@ const resume_tests = @import("resume_tests.zig");
 const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const qwen35_router_tests = @import("qwen35_router_tests.zig");
+const qwen36_tests = @import("qwen36_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
 const fp8_experts_tests = @import("fp8_experts_tests.zig");
 const nvfp4_experts_tests = @import("nvfp4_experts_tests.zig");
@@ -50,6 +51,7 @@ const usage =
     \\  resume MODEL IDS_FILE     prompt states kept at off-grid rows: each resumed pass against a fresh one, byte for byte
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
+    \\  qwen36-layers MODEL <aot> <oracle> [PROMPTS] [--teacher] [--steps N] Qwen3.6 engine vs the Python dumps (qwen36/capture.py), byte for byte
     \\  qwen35-router <aot> <dir> [rounds] Qwen3.6 router: Triton replay vs Python bytes (qwen35/capture_router.py), native vs both
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
@@ -130,6 +132,21 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "resume")) return resume_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "qwen36-layers")) {
+        var only: []const u8 = "story,code,facts,long";
+        var teacher = false;
+        var steps: usize = 32;
+        var i: usize = 3;
+        while (i < rest.len) : (i += 1) {
+            if (std.mem.eql(u8, rest[i], "--teacher")) {
+                teacher = true;
+            } else if (std.mem.eql(u8, rest[i], "--steps") and i + 1 < rest.len) {
+                i += 1;
+                steps = try std.fmt.parseInt(usize, rest[i], 10);
+            } else only = rest[i];
+        }
+        return qwen36_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), only, teacher, steps);
+    }
     if (std.mem.eql(u8, cmd, "qwen35-router")) return qwen35_router_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 240);
     if (std.mem.eql(u8, cmd, "carveout")) {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;

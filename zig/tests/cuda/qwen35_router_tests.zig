@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
-const router = @import("qwen35_router");
+const router = @import("qwen35_cuda").router;
 const check = @import("check.zig");
 
 const Gpu = check.Gpu;
