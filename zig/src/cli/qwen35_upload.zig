@@ -1,6 +1,4 @@
-//! tf-qwen35-upload MODEL [--device N] [--digests] [--mtp]: a Qwen3.5-family MoE checkpoint onto the GPU, its bytes resident.
-//! --digests prints "name sha256 bytes" for every uploaded tensor, the lines the oracle's weights.txt holds;
-//! --mtp also uploads the MTP head and prints (with --digests) the lines of the oracle's mtp_weights.txt.
+//! tf-qwen35-upload MODEL [--device N] [--digests] [--mtp]: uploads a Qwen3.5-family MoE checkpoint to the GPU.
 
 const std = @import("std");
 const cuda = @import("cuda");

@@ -1,4 +1,4 @@
-//! A Qwen3.6 MoE layer on CUDA as moe.run lays it out: router logits, picks, the pairs grouped by expert, SwiGLU up and down, the combine.
+//! A Qwen3.6 MoE layer on CUDA as moe.run lays it out: router, picks, pairs by expert, SwiGLU up and down, combine.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -10,7 +10,7 @@ const A4 = cuda.experts.Affine4Experts;
 const prompt_tile = 64; // pairs an item holds in a prompt pass (experts.promptTile)
 const decode_tile = 16;
 
-/// The kernels and scratch every MoE layer of a model shares: one layer runs at a time, over at most `rows` rows a call.
+/// The kernels and scratch every MoE layer of a model shares: one layer at a time, at most `rows` rows a call.
 pub const Block = struct {
     s: cuda.Stream,
     mods: [3]cuda.Module,
@@ -82,7 +82,7 @@ pub const Block = struct {
         return b.bufs[2].ptr;
     }
 
-    /// moe.run: normed rows `x` [rows, hidden] bf16 through layer `m` into `out` [rows, hidden] bf16 (`prompt`: a prompt pass's forms).
+    /// moe.run: normed rows `x` [rows, hidden] bf16 through layer `m` into `out` (`prompt`: a prompt pass's forms).
     pub fn run(b: *Block, m: experts.Moe, x: u64, rows: usize, prompt: bool, out: u64) !void {
         if (rows == 0 or rows > b.rows) return error.TooManyRows;
         const slots = b.sh.top_k + 1;

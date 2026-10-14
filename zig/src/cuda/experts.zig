@@ -31,7 +31,7 @@ pub const Layer = struct {
     swiglu: bool = false, // affine4: up stacks gate then up as [E][NI/32][D/64][2][288] under SwiGLU, not one relu^2 projection
 };
 
-/// A call's epilogue: up with its layer's activation (SwiGLU, or relu^2 for nvfp4 `relu2` and affine4 without `swiglu`), down to fp32 or to bf16 sums.
+/// A call's epilogue: up with its layer's activation (SwiGLU, or relu^2), down to fp32 or to bf16 sums.
 pub const Epi = enum { up, down_f32, down_bf16 };
 
 /// The rows in: bf16 `x` rows `stride` apart; `up` reads token rows (`slots` pairs a row), down reads pair rows.
@@ -87,7 +87,7 @@ fn int(x: usize) c_int {
     return @intCast(x);
 }
 
-/// MLX affine-4 experts (experts.cu, experts_prefill.cu, experts_pack.cu): relu^2 or SwiGLU up, down to fp32 or bf16 sums.
+/// MLX affine-4 experts (experts.cu, experts_prefill.cu, experts_pack.cu): relu^2 or SwiGLU up, down to fp32/bf16.
 pub const Affine4Experts = struct {
     fns: [3]Function, // decode, by Op
     pre_fns: [3]Function, // prompt, by Op
@@ -148,7 +148,7 @@ pub const Affine4Experts = struct {
         return a;
     }
 
-    /// experts.run (decode form): the ups take token rows (bf16 out; `limit` clamps SwiGLU, 0 for none), the down pair rows (fp32 out).
+    /// experts.run (decode form): ups take token rows (bf16 out; `limit` clamps SwiGLU, 0 none), down pair rows (fp32).
     pub fn run(e: *const Affine4Experts, s: Stream, o: Op, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, limit: f32, max_units: usize) !void {
         const i = @intFromEnum(o);
         const grid = @min((max_units + 3) / 4, e.resident[i]);
@@ -178,7 +178,7 @@ pub const Affine4Experts = struct {
         try launch_.launch(e.pack_fn, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(count) }, .block = .{ .x = 288 } }, s, &a);
     }
 
-    /// experts.make's SwiGLU up: gate then up into `out` as [E][n/32][k/64][2][288] int32; `scratch` is bytes(count, n, k).
+    /// experts.make's SwiGLU up: gate then up into `out` as [E][n/32][k/64][2][288] int32; `scratch`: bytes(count,n,k).
     pub fn packGateUp(e: *const Affine4Experts, d: *const Driver, s: Stream, gate: Mats, up: Mats, scratch: u64, out: u64, count: usize, n: usize, k: usize) !void {
         const block = 288 * 4;
         for ([_]Mats{ gate, up }, 0..) |m, i| {

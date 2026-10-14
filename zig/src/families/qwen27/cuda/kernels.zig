@@ -84,7 +84,7 @@ pub const Kernels = struct {
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
-    /// Loads every module; `triton_dir` holds the captured aot.json and cubins for this GPU (null: none, see `native_only`).
+    /// Loads every module; `triton_dir` holds this GPU's captured aot.json and cubins (null: none, see `native_only`).
     pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, triton_dir: ?[]const u8, heads: usize) !Kernels {
         const d = ctx.d;
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -182,7 +182,7 @@ pub const Ops = struct {
         try o.goWith(f, grid, block, shared, args, false);
     }
 
-    /// `pdl` only for a kernel that begins with the grid wait (pdl.cuh), and only on a GPU the decode kernels run PDL on.
+    /// `pdl` only for a kernel that begins with the grid wait (pdl.cuh), and only on a GPU where decode uses PDL.
     fn goWith(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args, pdl: bool) !void {
         try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared, .pdl = pdl and o.k.gb10 }, o.s, args);
     }
@@ -195,7 +195,7 @@ pub const Ops = struct {
         return if (sk > 1 and rows <= o.k.gemv_rows) o.gemv(x, xs, q, out, rows, sk) else o.cluster(x, xs, q, out, rows, sk);
     }
 
-    /// qmm.matmul_group on sm_12x: up to four projections of one input in one launch, each with the bits of its own dense().
+    /// qmm.matmul_group on sm_12x: up to four projections of one input in one launch, each bit-equal to its dense().
     pub fn denseGroup(o: Ops, x: u64, xs: u64, items: []const Item, rows: usize) !void {
         if (items.len > 4) return error.TooManyParts;
         if (items.len == 1 or rows <= o.k.gemv_rows) {

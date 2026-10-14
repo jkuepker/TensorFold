@@ -25,7 +25,7 @@ pub const Forward = struct {
     norms: usize = 0, // the pass's norm calls so far, as the hooks number them (the caller resets it a pass)
     every: ?u64 = null, // a prompt chunk's final normed rows (W x hidden bf16) for a draft head, written by chunk
 
-    /// What a family or a test plugs into the layer loop: its MLP (rows `y` normed with sums `xs` in, bf16 rows out) and a look at each norm's rows.
+    /// What a family or test plugs into the layer loop: its MLP (normed rows `y`, sums `xs` in, bf16 out), a norm tap.
     pub const Hooks = struct {
         ctx: *anyopaque,
         mlp: ?*const fn (ctx: *anyopaque, layer: usize, y: u64, xs: u64, rows: usize, prompt: bool, out: u64) anyerror!void = null,

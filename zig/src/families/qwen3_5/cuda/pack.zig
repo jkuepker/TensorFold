@@ -36,7 +36,7 @@ pub const Kernels = struct {
         for (&k.mods) |*m| m.unload();
     }
 
-    /// experts.make for one matrix: `count` experts' MLX words (n, k/8), scales and biases (n, k/64) into `out`'s blocks.
+    /// experts.make for one matrix: `count` experts' MLX words, scales and biases into `out`'s blocks.
     pub fn experts(k: *const Kernels, words: u64, scales: u64, biases: u64, out: u64, count: usize, n: usize, kk: usize) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ words, scales, biases, out }) |v| a.add(v);

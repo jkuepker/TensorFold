@@ -66,8 +66,7 @@ fn stacks(r: qwen35.host.Routed, g: shape.Geometry, moe: shape.Moe) !Stacks {
     return .{ .fused = fused, .down = down };
 }
 
-/// A layer's router and experts uploaded, packed and checked; `r`'s host memory is read by the time this returns
-/// but the copies may be queued: settle the loader before freeing it.
+/// A layer's router and experts uploaded, packed and checked; copies may be queued, so settle the loader first.
 pub fn upload(L: *w27.Loader, k: *const pack.Kernels, r: qwen35.host.Routed, g: shape.Geometry, moe: shape.Moe) !Moe {
     const s = try stacks(r, g, moe);
     const e = r.experts.count;

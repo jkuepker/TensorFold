@@ -81,8 +81,7 @@ pub const Weights = struct {
     }
 };
 
-/// The model folder's text tensors on the GPU: trunk tensors as the 27B's loader tiles them, each layer's router and
-/// experts from the host loader (8-bit routers widened to bf16 there), leftovers refused.
+/// The model folder's text tensors on the GPU: trunk as the 27B's loader tiles it, routers and experts from the host.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir: []const u8) !Weights {
     var host = try qwen35.Checkpoint.open(gpa, io, dir);
     defer host.close();

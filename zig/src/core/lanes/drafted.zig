@@ -198,7 +198,7 @@ pub const Drafted = struct {
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
     }
 
-    /// How many drafts a drafter with early-ending chains kept (tokens stay with it: verify reads them); null: as asked.
+    /// How many drafts a drafter with early-ending chains kept (tokens stay with it for verify); null: as asked.
     fn tree(ptr: *anyopaque, s: *Stream, _: Allocator) anyerror!?Held {
         const x = self(ptr);
         const lane = x.lanes.getPtr(s) orelse return null;

@@ -13,12 +13,12 @@ const Engine = engine.Engine;
 /// cuMemAlloc hands out whole 2 MiB pages: a kept state is charged for them.
 const page: usize = 2 << 20;
 
-/// The device bytes a kept state of `at` tokens takes: every DeltaNet layer's recurrence and conv window, every attention layer's keys and values, and with `rows` the prompt's final normed rows a draft head reads.
+/// The device bytes a kept state of `at` tokens takes: DeltaNet recurrence and conv, attention K/V, and `rows` if set.
 pub fn bytes(g: c.Geometry, at: usize, rows: bool) usize {
     return std.mem.alignForward(usize, stateLen(g, at) + if (rows) at * g.hidden * 2 else 0, page);
 }
 
-/// One kept state: the stream's layers laid end to end in a device buffer, then (when a drafting stream kept it) the prompt's normed rows.
+/// One kept state: the stream's layers laid end to end in a device buffer, then (if drafting) the prompt's normed rows.
 pub const Saved = struct { buf: cuda.DeviceBuffer, at: usize, gpa: std.mem.Allocator, rows: ?u64 = null };
 
 const Part = struct { dev: u64, len: usize };
@@ -43,8 +43,7 @@ fn move(ops: kern.Ops, g: c.Geometry, seq: *const st.Seq, base: u64, at: usize, 
     }
 }
 
-/// The stream's state after `at` prompt tokens, copied on the engine's stream (the pass stands at `at`).
-/// `rows` is the stream's held normed rows (at least `at` of them), kept beside the state.
+/// The stream's state after `at` prompt tokens, copied on the engine's stream; `rows` (held normed rows) kept with it.
 pub fn save(gpa: std.mem.Allocator, ops: kern.Ops, g: c.Geometry, seq: *const st.Seq, at: usize, rows: ?u64) !*Saved {
     if (seq.pos != at) return error.NotAtMark;
     const saved = try gpa.create(Saved);
@@ -60,8 +59,7 @@ pub fn save(gpa: std.mem.Allocator, ops: kern.Ops, g: c.Geometry, seq: *const st
     return saved;
 }
 
-/// The stream's state made `saved`'s: its prompt pass goes on from `saved.at`.
-/// `rows`, a drafting stream's held rows, get the kept ones back (the state must have kept them).
+/// The stream's state made `saved`'s: its prompt pass goes on from `saved.at`; a drafting stream's `rows` are restored.
 pub fn restore(ops: kern.Ops, g: c.Geometry, seq: *st.Seq, saved: *const Saved, rows: ?u64) !void {
     if (saved.at >= seq.capacity) return error.PromptTooLong;
     try move(ops, g, seq, saved.buf.ptr, saved.at, true);
@@ -78,7 +76,7 @@ pub fn drop(saved: *Saved) void {
 /// The streams' states by stream: what the cache's copies read and write.
 pub const Seqs = std.AutoHashMapUnmanaged(*lanes.Stream, *st.Seq);
 
-/// What the prompt cache copies: the engine, and the lane backend's streams (a state belongs to the stream whose pass keeps it).
+/// What the prompt cache copies: the engine and the lane backend's streams (a state belongs to its keeping stream).
 pub const Target = struct { e: *Engine, seqs: *const Seqs, held: *const features.Held };
 
 fn target(p: *anyopaque) *const Target {
@@ -110,8 +108,7 @@ pub fn snapDrop(_: *anyopaque, saved: *anyopaque) void {
     drop(@ptrCast(@alignCast(saved)));
 }
 
-/// The stream's prompt pass: its kept state restored when the cache found one, then the prompt's rows, the cache's marks kept on the way.
-/// `rows` (a drafting stream's held rows) take the kept state's rows too; a state kept without them is left alone.
+/// The stream's prompt pass: restores the kept state if the cache found one, then the prompt's rows, keeping marks.
 pub fn prefill(e: *Engine, s: *lanes.Stream, seq: *st.Seq, rows: ?u64) !void {
     const ids = s.prompt();
     var from: usize = 0;

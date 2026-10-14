@@ -1,4 +1,4 @@
-//! Qwen3.5-family models on CUDA: the MoE checkpoint on the GPU in the 27B engine's layouts, and its router and experts.
+//! Qwen3.5-family models on CUDA: the MoE checkpoint on the GPU in the 27B engine's layouts.
 
 pub const pack = @import("cuda/pack.zig");
 pub const experts = @import("cuda/experts.zig");

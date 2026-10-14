@@ -1,5 +1,4 @@
-//! The Qwen3.6 MTP layer on the GPU as the Python engine's load_mtp packs it: fc halves, norms, one attention layer,
-//! routed experts, and the draft head (the lm_head rows of the draft vocabulary, tiled like any projection).
+//! The Qwen3.6 MTP layer on the GPU as the Python load_mtp packs it: fc, norms, attention, experts, draft head.
 
 const std = @import("std");
 const cuda = @import("cuda");

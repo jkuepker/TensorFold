@@ -14,7 +14,7 @@ const nemotron_slide = @import("nemotron_slide.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{ nemotron.native, qwen27.native, qwen35.native, qwen35.minicpm };
 
-/// A family's prompt-cache copies (its snap_* functions). A comptime value so the store's pointer stays valid for the process.
+/// A family's prompt-cache copies (its snap_* functions), comptime so the store's pointer stays valid.
 fn snapshots(comptime F: type) *const api.prompt_cache.Snapshots.VTable {
     return &struct {
         const v: api.prompt_cache.Snapshots.VTable = .{ .bytes = F.snap_bytes, .save = F.snap_save, .restore = F.snap_restore, .drop = F.snap_drop };
@@ -367,7 +367,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     if (@hasDecl(F, "snap_bytes") and cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // a row's bits ignore the cuts, a kept row costs no call: states keep at any row; the head reads one token on; replies prefill when it is quiet (snap_warm)
+        // a row's bits ignore the cuts and a kept row costs no call: states keep at any row
         const spare = if (@hasDecl(F, "snap_ready")) try F.snap_ready(loaded.target, cache) else 0; // spare storage it sets aside comes out of the budget
         store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = snapshots(F) }, .{ .lookahead = F.snap_rules.lookahead, .min_prompt = F.snap_rules.min_prompt, .warm = if (@hasDecl(F, "snap_warm")) .waits else .off }, cache - spare);
         h.store = store;

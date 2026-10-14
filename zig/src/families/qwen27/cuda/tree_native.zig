@@ -1,5 +1,4 @@
-//! Qwen3.6 tree attention from qwen_attention.cu: attention.py's _shared, _tail and _merge, byte-equal to their Triton cubins.
-//! `exact` names what tf-cuda-test qwen-attention showed byte-equal on every shape the engine serves; the rest replays.
+//! Qwen3.6 tree attention from qwen_attention.cu (_shared, _tail, _merge), native where `exact` says it is byte-equal.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -18,7 +17,7 @@ pub const heads = 16;
 pub const kv_heads = 2;
 pub const head_dim = 256;
 
-/// qwen_attention.cu's Smem: two 64-key tiles of 264-wide rows, the 16 x 72 probabilities, the row max and sum of 4 warps.
+/// qwen_attention.cu's Smem: two 64-key tiles of 264-wide rows, the 16 x 72 probabilities, and the row max and sum.
 const smem_bytes: u32 = 2 * 64 * 264 * 2 + 16 * 72 * 2 + 2 * 4 * 16 * 4;
 
 fn u(x: usize) u32 {

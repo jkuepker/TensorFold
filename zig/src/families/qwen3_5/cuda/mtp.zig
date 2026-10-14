@@ -1,5 +1,4 @@
-//! The Qwen3.6 MTP head's forward on CUDA (mtp.py Head._layer): [norm(embed(next token)) | norm(state)] through fc,
-//! one attention layer over the head's own cache, routed experts, a norm, and the draft head over one row.
+//! The Qwen3.6 MTP head's forward on CUDA (mtp.py Head._layer): fc, attention, routed experts, norm, draft head.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -111,9 +110,7 @@ pub const Head = struct {
         return .{ .heads = g.query_heads, .kv_heads = g.kv_heads, .dim = c.head_dim, .half = c.rotary_dim / 2 };
     }
 
-    /// Rows at positions [p0, p0 + n): each a (state at t, token t + 1) pair attending to the cache's slots below p0 and
-    /// to the rows before it. `states` (device, bf16 [n, hidden]) are the target's final normed rows. The normed outputs
-    /// land in `normed` (with sums in `normed_xs`), the rows' keys and values at slots [p0, p0 + n) of `cache`.
+    /// Rows at positions [p0, p0 + n): each a (state at t, token t + 1) pair; `states` are the target's normed rows.
     pub fn forward(h: *Head, cache: *Cache, states: u64, tokens: []const u32, p0: usize) !void {
         const n = tokens.len;
         const e = h.e;

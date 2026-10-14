@@ -1,6 +1,4 @@
-//! MiniCPM-V 4.7 (minicpmv4_7), text only, on CUDA: a fine-tune of Qwen3.6-35B-A3B served by Qwen3.6's engine.
-//! Its config wraps a qwen3_5_moe_text tower with its own 248,144-id vocabulary; it ships no MTP layer, so drafts read
-//! Qwen3.6's from a side file. The image tower's tensors are not read.
+//! MiniCPM-V 4.7 (minicpmv4_7), text only, on CUDA: a Qwen3.6-35B-A3B fine-tune served by Qwen3.6's engine.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -21,14 +19,14 @@ pub const snap_drop = base.snap_drop;
 pub const snap_rules = base.snap_rules;
 pub const refusal = base.refusal;
 
-/// The MTP layer's file name in Qwen3.6's 4-bit repo, and the repos that hold it (the org moved: the old name is cached too).
+/// The MTP layer's file name in Qwen3.6's 4-bit repo, and the repos that hold it (old and new org names).
 pub const mtp_file = "mtp-4bit.safetensors";
 const repos = [_][]const u8{ "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP", "Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP" };
 
 /// Where the draft head comes from: a file, or nothing to draft with.
 pub const Found = union(enum) { path: []const u8, off, none };
 
-/// TF_QWEN36_MTP (a path, or 0 for none), the checkpoint's own mtp-4bit.safetensors, else the cached Qwen3.6 repo's file.
+/// TF_QWEN36_MTP (a path, or 0 for none), the checkpoint's own mtp file, else the cached Qwen3.6 repo's file.
 pub fn pick(a: std.mem.Allocator, io: std.Io, dir: []const u8, named: ?[]const u8, hub: ?[]const u8) !Found {
     if (named) |n| if (n.len > 0) {
         if (std.mem.eql(u8, n, "0")) return .off;

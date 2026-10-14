@@ -1,5 +1,4 @@
-//! Qwen3.6's per-layer prep kernels (glue.gdn_pre, glue.attn_prep) as qwen_prep.cu runs them: byte-equal to the captured Triton cubins.
-//! Exact path: Triton replay (triton.zig). Native path: used where `exact` says it matches (tf-cuda-test qwen-prep decides).
+//! Qwen3.6's per-layer prep kernels (glue.gdn_pre, glue.attn_prep) from qwen_prep.cu, native where `exact` says so.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -8,10 +7,10 @@ const cuda = @import("cuda");
 pub const exact: Exact = .{ .gdn_pre = true, .attn_prep = true };
 pub const Exact = struct { gdn_pre: bool, attn_prep: bool };
 
-/// compute capability byte-equality shown on (GB10); libdevice-class math and ex2/rcp/sqrt approximations are architecture's own.
+/// The compute capability the byte-equality was shown on (GB10); libdevice-class math is architecture-specific.
 pub const verified_capability: u32 = 121;
 
-/// the shapes the captured launches and this test cover (Qwen3.6 35B-A3B and MiniCPM-V 4.7); any other stays on the replay.
+/// The shapes the captured launches and this test cover (Qwen3.6 35B-A3B, MiniCPM-V 4.7); any other stays on replay.
 pub fn gdnFits(kh: usize, vh: usize, dk: usize, c: usize, keep: usize) bool {
     return c == 8192 and kh == 16 and vh == 32 and dk == 128 and keep == 3;
 }
@@ -50,7 +49,7 @@ pub const Native = struct {
         try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = 64 }, .pdl = true }, s, a); // both kernels wait on the grid before them
     }
 
-    /// glue.gdn_pre: conv over each row's window [state; qkv], q/k norms, g and beta; `sid`: per-row stream (MULTI). Shapes as Tri.gdnPre's.
+    /// glue.gdn_pre: conv over each row's window [state; qkv], q/k norms, g, beta; `sid`: per-row stream (MULTI).
     pub fn gdnPre(n: Native, s: cuda.Stream, qkv: u64, cs: u64, cw: u64, win: u64, sid: ?u64, a: u64, b: u64, alog: u64, dtb: u64, q: u64, k: u64, v: u64, g: u64, beta: u64, rows: usize, kh: usize, vh: usize, dk: usize, c: usize, keep: usize) !void {
         if (!gdnFits(kh, vh, dk, c, keep)) return error.PrepShape;
         var args: cuda.Args = .{};

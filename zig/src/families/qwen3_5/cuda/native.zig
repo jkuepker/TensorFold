@@ -1,4 +1,4 @@
-//! Qwen3.6 MoE (qwen3_5_moe) on CUDA behind the native family interface (native/cuda.zig's registry): the 27B's engine with the MoE block in place of its dense MLP.
+//! Qwen3.6 MoE (qwen3_5_moe) on CUDA behind the native family interface (native/cuda.zig's registry).
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -70,7 +70,7 @@ pub const Moe = struct {
     }
 };
 
-/// The engine, its lane backend, the prompt cache's target, and with drafts the MTP head, its drafter and the wrapper that joins them.
+/// The engine, its lane backend, the prompt cache's target, and with drafts the MTP head, drafter and wrapper.
 const Owned = struct {
     gpa: std.mem.Allocator,
     e: *q.Engine,
@@ -82,7 +82,7 @@ const Owned = struct {
     drafting: bool = false,
 };
 
-/// Whether every launch of this geometry has a built-in kernel (the dispatch's own shape guards); without a captured set nothing else can run it.
+/// Whether every launch of this geometry has a built-in kernel (the dispatch's own shape guards).
 fn builtinCovers(g: q.config.Geometry) bool {
     const moe_ = g.moe orelse return false;
     const attn: q.triton.Attn = .{ .heads = g.query_heads, .kv_heads = g.kv_heads, .dim = q.config.head_dim, .half = q.config.rotary_dim / 2 };
@@ -166,7 +166,7 @@ pub fn openWith(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, di
     return loaded;
 }
 
-/// The MTP head from the checkpoint's side file (or its own tensors), its drafter and the wrapper; window costs timed first.
+/// The MTP head from the checkpoint's side file (or its own tensors), its drafter and the wrapper.
 fn draftsOn(own: *Owned, io: std.Io, ctx: *const cuda.Context, dir: []const u8, side: ?[]const u8) !void {
     const e = own.e;
     const block: *moe.Block = &@as(*Moe, @ptrCast(@alignCast(e.hooks.?.ctx))).block;

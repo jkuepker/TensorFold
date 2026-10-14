@@ -167,7 +167,7 @@ pub const Drafter = struct {
         return @exp(x - stats[0]) / stats[1];
     }
 
-    /// The target's draw rule on the head's logits, mapped to a token (decode.draft): the greedy column, or a keyed draw; with its probability if `more` (a chain goes on by it).
+    /// The target's draw rule on the head's logits, mapped to a token (decode.draft): greedy column or keyed draw.
     fn draw(d: *Drafter, rule: ?lanes.Sampling, position: u64, more: bool) !Pick {
         const h = d.head;
         const ids = h.w.ids;

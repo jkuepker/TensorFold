@@ -1,4 +1,4 @@
-//! tf-qwen35-index DIR: opens a Qwen3.5 / Qwen3.6 checkpoint through the host loader and prints its config and tensor index.
+//! tf-qwen35-index DIR: opens a Qwen3.5 / Qwen3.6 checkpoint, prints its config and tensor index.
 const std = @import("std");
 const qwen = @import("qwen35");
 

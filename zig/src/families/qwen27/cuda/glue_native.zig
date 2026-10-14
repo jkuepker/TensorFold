@@ -1,17 +1,17 @@
-//! Qwen3.6's row glue as built-in kernels (qwen_glue.cu, embed_rows.cu): used where tf-cuda-test qwen-glue showed them byte-equal to the Triton launches.
+//! Qwen3.6's row glue as built-in kernels (qwen_glue.cu, embed_rows.cu), used where tf-cuda-test qwen-glue shows it.
 
 const std = @import("std");
 const cuda = @import("cuda");
 
-/// Which native kernels reproduce the captured Triton launches bit for bit on every shape served (tf-cuda-test qwen-glue decides); the rest replay.
+/// Which native kernels reproduce the captured Triton launches bit for bit on every served shape; the rest replay.
 pub const exact: Exact = .{ .embed = true, .add_rmsnorm = true, .gate_mul = true, .gated_norm = true, .group_sums = true, .paths = true };
 
 pub const Exact = struct { embed: bool, add_rmsnorm: bool, gate_mul: bool, gated_norm: bool, group_sums: bool, paths: bool };
 
-/// The compute capability the byte-equality was shown on (GB10): MUFU and the div.full expansion are an architecture's own.
+/// The compute capability the byte-equality was shown on (GB10): MUFU and div.full expansion are architecture-specific.
 pub const verified_capability: u32 = 121;
 
-/// The shapes the byte-equality was shown on (the captured set's constexprs): hidden width, value heads and width, query heads and width, paths' depth cap.
+/// The shapes the byte-equality was shown on (the captured constexprs): widths, heads, and the paths' depth cap.
 pub const hidden = 2048;
 pub const value_heads = 32;
 pub const value_dim = 128;
@@ -84,7 +84,7 @@ pub const Native = struct {
         return d == hidden and aligned(ptrs);
     }
 
-    /// h = bf16(x + r), y = bf16(rmsnorm(h) * w), xs = y's 64-group sums; without `r` the norm reads x and h is not written.
+    /// h = bf16(x + r), y = bf16(rmsnorm(h) * w), xs = y's 64-group sums; without `r` the norm reads x, h unwritten.
     pub fn addRmsnorm(n: Native, s: cuda.Stream, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: u64, rows: usize, eps: f32) !void {
         if (rows == 0) return;
         var a: cuda.Args = .{};

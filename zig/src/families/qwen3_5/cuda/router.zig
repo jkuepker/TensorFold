@@ -1,11 +1,10 @@
-//! Qwen3.6's MoE router on CUDA: fp32 logits over the experts and the shared gate row, softmax top-k, the slot-order combine.
-//! Exact path: the Python engine's captured Triton cubins. Native path: qwen_route.cu, used only where byte-equal.
+//! Qwen3.6's MoE router on CUDA: fp32 expert logits, softmax top-k, slot-order combine (cubins or qwen_route.cu).
 
 const std = @import("std");
 const cuda = @import("cuda");
 const aot = cuda.aot;
 
-/// Which native kernels reproduce the Triton launches bit for bit (tf-cuda-test qwen35-router decides); the rest replay.
+/// Which native kernels reproduce the Triton launches bit for bit (tf-cuda-test qwen35-router decides).
 pub const exact: Exact = .{ .logits = true, .select = true, .combine = true };
 
 pub const Exact = struct { logits: bool, select: bool, combine: bool };
@@ -38,7 +37,7 @@ pub fn tile(m: usize) usize {
     return 128;
 }
 
-/// The captured Triton launches, with moe.py's grids and constexprs; pointers must be 16-aligned, as the captured variants are.
+/// The captured Triton launches, with moe.py's grids and constexprs; pointers must be 16-aligned.
 pub const Replay = struct {
     set: *const aot.Set,
     s: cuda.Stream,
@@ -69,7 +68,7 @@ pub const Replay = struct {
     }
 };
 
-/// K columns the native router stages a step, and the dynamic shared bytes its stages take (qwen_route.cu's KC, STAGES, PAD).
+/// K columns the native router stages a step, and the dynamic shared bytes they take (qwen_route.cu's KC, STAGES, PAD).
 pub const stage_columns = 256;
 const router_shared: u32 = 3 * (16 + 32) * (stage_columns + 8) * 2;
 

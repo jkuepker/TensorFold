@@ -1,4 +1,4 @@
-//! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head; other geometries require qualification.
+//! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head.
 const std = @import("std");
 
 pub const hidden = 2048;
@@ -316,7 +316,7 @@ pub const Spec = struct {
     }
 };
 
-/// The config's root object, when its model_type is a Qwen3.5 text model, dense or sparse, or MiniCPM-V 4.7 over a Qwen3.6 text tower.
+/// The config's root object, when its model_type is a Qwen3.5 text model (dense or sparse) or MiniCPM-V 4.7.
 pub fn declared(a: std.mem.Allocator, bytes: []const u8) Error!std.json.ObjectMap {
     const doc = try objectOf(try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}));
     const kind = doc.get("model_type") orelse return error.UnsupportedModel;

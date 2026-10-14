@@ -22,7 +22,7 @@ pub fn chunkBounds(start: usize, end: usize, size: usize, j: usize) [2]usize {
 
 pub const Options = struct { context: usize };
 
-/// Where a prompt pass stops to let the cache keep its state: each of `at` (ascending) ends a chunk and `call` runs there.
+/// Where a prompt pass stops so the cache can keep its state: each `at` (ascending) ends a chunk and `call` runs.
 pub const Keep = struct { at: []const u32, ctx: *anyopaque, call: *const fn (ctx: *anyopaque, at: u32) void };
 
 /// A family's own weights and layer pieces beside this engine's: freed in place of `w` before the kernels they read.
@@ -104,7 +104,7 @@ pub const Engine = struct {
         return e.prefillFrom(seq, prompt, 0, null, rows);
     }
 
-    /// The prompt's rows from `from` (a restored state's position, 0: an empty one); each of `keep.at` ends a chunk and is called there; `rows` as in prefillRows.
+    /// The prompt's rows from `from` (restored position, 0: empty); `keep.at` ends chunks; `rows` as in prefillRows.
     pub fn prefillFrom(e: *Engine, seq: *st.Seq, prompt: []const u32, from: usize, keep: ?Keep, rows: ?u64) !void {
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len >= seq.capacity) return error.PromptTooLong;
