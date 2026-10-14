@@ -50,7 +50,8 @@ pub const Rig = struct {
     k: *kern.Kernels,
     scratch: *st.Scratch,
     seqs: []st.Seq,
-    home: [st.max_streams][2]u64, // each stream's attention-layer key and value caches as the arena gave them
+    home: [st.max_streams][2]u64, // each stream's attention-layer key and value caches as the arena gave them (the first `seqs.len`)
+    cap: usize, // positions each stream's caches hold
     pool: [2][2]cuda.DeviceBuffer, // pristine keys and values: normal, heavy tail
     q: cuda.DeviceBuffer,
     kn: cuda.DeviceBuffer,
@@ -110,7 +111,7 @@ pub const Rig = struct {
             const slack = i * 4096 * 2;
             for ([_]struct { dst: u64, src: cuda.DeviceBuffer }{ .{ .dst = seq.keys[3], .src = r.pool[pool][0] }, .{ .dst = seq.values[3], .src = r.pool[pool][1] } }) |c| {
                 try o.copy(c.dst, c.src.ptr + slack, sp.p * kv_row * 2);
-                try o.fill32(c.dst + sp.p * kv_row * 2, nan_words, (capacity - 128 - sp.p) * kv_row / 2); // the 128 spare positions hold the shift
+                try o.fill32(c.dst + sp.p * kv_row * 2, nan_words, (r.cap - 128 - sp.p) * kv_row / 2); // the 128 spare positions hold the shift
             }
         }
     }
@@ -380,22 +381,22 @@ pub const Env = struct {
     made: usize,
     rig: Rig,
 
-    pub fn init(env: *Env, gpu: check.Gpu, kernels: ?[]const u8) !void {
+    pub fn init(env: *Env, gpu: check.Gpu, kernels: ?[]const u8, cap: usize, streams: usize) !void {
         const gpa = gpu.gpa;
         env.gpa = gpa;
         env.stream = try cuda.Stream.init(gpu.d, true);
         errdefer env.stream.deinit();
         env.k = try kern.Kernels.load(gpa, gpu.io, gpu.ctx, kernels, geometry.linear_v_heads);
         errdefer env.k.deinit();
-        env.scratch = try st.Scratch.init(gpa, gpu.d, geometry, 256, capacity);
+        env.scratch = try st.Scratch.init(gpa, gpu.d, geometry, 256, cap);
         errdefer env.scratch.deinit();
         const o: kern.Ops = .{ .k = &env.k, .s = env.stream };
-        env.seqs = try gpa.alloc(st.Seq, st.max_streams);
+        env.seqs = try gpa.alloc(st.Seq, streams);
         errdefer gpa.free(env.seqs);
         env.made = 0;
         errdefer for (env.seqs[0..env.made]) |*sq| sq.deinit();
         for (env.seqs) |*sq| {
-            sq.* = try st.Seq.init(gpa, o, geometry, capacity);
+            sq.* = try st.Seq.init(gpa, o, geometry, cap);
             env.made += 1;
         }
         const part_elems = env.scratch.part_chunks * st.round_rows * H;
@@ -407,6 +408,7 @@ pub const Env = struct {
             .scratch = &env.scratch,
             .seqs = env.seqs,
             .home = undefined,
+            .cap = cap,
             .pool = undefined,
             .q = try cuda.DeviceBuffer.alloc(gpu.d, 16),
             .kn = try cuda.DeviceBuffer.alloc(gpu.d, 16),
@@ -419,10 +421,10 @@ pub const Env = struct {
         };
         const rig = &env.rig;
         @memset(rig.covered, false);
-        for (env.seqs, &rig.home) |sq, *h| h.* = .{ sq.keys[3], sq.values[3] };
+        for (env.seqs, rig.home[0..env.seqs.len]) |sq, *h| h.* = .{ sq.keys[3], sq.values[3] };
         for (&rig.part) |*b| b.* = .{ .o = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * D * 4), .m = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4), .l = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4) };
         for (&rig.pool, 0..) |*pr, i| for (pr) |*b| {
-            b.* = try rig.fresh(capacity * kv_row + 16 * 4096, i == 1, 1.0);
+            b.* = try rig.fresh(cap * kv_row + 16 * 4096, i == 1, 1.0);
         };
         try env.stream.synchronize();
     }
@@ -440,7 +442,7 @@ pub const Env = struct {
 
 pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
     var env: Env = undefined;
-    try env.init(gpu, kernels);
+    try env.init(gpu, kernels, capacity, st.max_streams);
     defer env.deinit();
     const rig = &env.rig;
     const k = &env.k;

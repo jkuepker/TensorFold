@@ -9,19 +9,44 @@ const att = @import("qwen_attention_tests.zig");
 const ref = @import("qwen_attention_f64_ref.zig");
 
 const tri = qwen27.triton;
+const st = qwen27.state;
 const H = att.H;
 const D = att.D;
 const HK = att.HK;
 const grid_p = [_]usize{ 0, 1, 511, 512, 513, 2047, 2048, 4096, 6144, 8191 };
 const grid_w = [_]usize{ 1, 4, 17, 64 };
 const wide_p = [_]usize{ 0, 511, 4096, 8191 }; // the widest window (128 rows) is dear for the float64 reference: a few lengths
+const longest = 262143; // the longest context the model serves, less one: the last committed length
+const long_cap = longest + 256 + 1; // caches of the long cases: the window's rows and a spare position past the longest
+const long_streams = 2;
+// 131071 is the longest unfolded stream (256 slots); 262143 folds 127 groups into 131 (0.15 s a row and head to check)
+const Long = struct { p: usize, w: usize, kind: att.Kind = .chain, pool: usize = 0 };
+const long_cases = [_]Long{ // folding needs p / 2048 x w >= 64: 16383 / 16384 and 32768 / 65535 / 131071 / 131072 straddle it
+    .{ .p = 16383, .w = 8 },
+    .{ .p = 16384, .w = 8 },
+    .{ .p = 16384, .w = 8, .kind = .bushy },
+    .{ .p = 32768, .w = 1 },
+    .{ .p = 32768, .w = 2, .kind = .bushy },
+    .{ .p = 32768, .w = 4 },
+    .{ .p = 32768, .w = 4, .kind = .bushy, .pool = 1 },
+    .{ .p = 32768, .w = 64 },
+    .{ .p = 65535, .w = 1 },
+    .{ .p = 65535, .w = 3, .kind = .bushy },
+    .{ .p = 131071, .w = 1 },
+    .{ .p = 131071, .w = 2, .kind = .bushy },
+    .{ .p = 131072, .w = 1 },
+    .{ .p = 131072, .w = 4, .pool = 1 },
+    .{ .p = 131072, .w = 4, .kind = .bushy },
+    .{ .p = longest, .w = 1 },
+    .{ .p = longest, .w = 4, .kind = .bushy },
+};
 
 const Ctx = struct {
     rig: *att.Rig,
     gpa: std.mem.Allocator,
-    out: f64t.Pair, // the attention output, by head dim
-    po: f64t.Pair, // each partial slot's o / l, by head dim
-    lse: f64t.Pair, // each partial slot's m + ln l, by query head
+    out: f64t.Phased, // the attention output, by head dim; decode (up to 16 rows in the call) and prompt-sized calls apart
+    po: f64t.Phased, // each partial slot's o / l, by head dim
+    lse: f64t.Phased, // each partial slot's m + ln l, by query head
     scores: []f64,
     row: *ref.Row,
     cases: usize = 0,
@@ -56,9 +81,8 @@ fn partialAt(r: Raw, idx: usize) struct { lse: f64, pl: f64, pm: f64 } {
     return .{ .lse = pm + @log(pl), .pl = pl, .pm = pm };
 }
 
-// One stream's rows against the reference: the output, then every slot the row's keys land in.
-fn compare(c: *Ctx, s: *const ref.Stream, q: []const u8, nat: Raw, rep: ?Raw, rows: usize) !void {
-    const width = rows;
+// One stream's rows against the reference: the output, then every slot its keys land in; `width` is the call's rows.
+fn compare(c: *Ctx, s: *const ref.Stream, q: []const u8, nat: Raw, rep: ?Raw, width: usize) !void {
     const nslots = tri.slots(s.p, s.w);
     for (0..s.w) |j| {
         const node = s.start + j;
@@ -68,18 +92,18 @@ fn compare(c: *Ctx, s: *const ref.Stream, q: []const u8, nat: Raw, rep: ?Raw, ro
             for (0..D) |d| {
                 const at = (node * H + head) * D + d;
                 const tg: ?f64 = if (rep) |x| f64t.bfAt(x.out, at) else null;
-                c.out.add(d, f64t.bfAt(nat.out, at), tg, r.out[d], r.out_bound[d], r.floor[d]);
+                c.out.at(width).add(d, f64t.bfAt(nat.out, at), tg, r.out[d], r.out_bound[d], r.floor[d]);
             }
             for (0..r.slots) |slot| {
                 if (!r.live[slot]) continue;
                 const idx = (slot * width + node) * H + head;
                 const pn = partialAt(nat, idx);
                 const pt: ?@TypeOf(pn) = if (rep) |x| partialAt(x, idx) else null;
-                c.lse.add(head, pn.lse, if (pt) |t| t.lse else null, r.lse[slot], r.lse_bound, 1);
+                c.lse.at(width).add(head, pn.lse, if (pt) |t| t.lse else null, r.lse[slot], r.lse_bound[r.class(slot)], 1);
                 for (0..D) |d| {
                     const got = f64t.f32At(nat.po, idx * D + d) / pn.pl;
                     const tg: ?f64 = if (rep) |x| f64t.f32At(x.po, idx * D + d) / pt.?.pl else null;
-                    c.po.add(d, got, tg, r.onorm[slot][d], r.onorm_bound[d], r.floor[d]);
+                    c.po.at(width).add(d, got, tg, r.onorm[slot][d], r.onorm_bound[r.class(slot)][d], r.floor[d]);
                 }
             }
             for (r.slots..nslots) |slot| { // chunks past this row's last key: written empty (l = 0, m = -inf)
@@ -100,6 +124,7 @@ fn runCase(c: *Ctx, specs: []const att.Spec, pool: usize) !void {
     try rig.load(specs, pool);
     try att.inputs(rig, pool == 1);
     const sg = try att.stage(rig, specs, &par);
+    try check.expect(sg.slots <= ref.max_slots, "{d} partial slots past the reference's {d}", .{ sg.slots, ref.max_slots });
     for (rig.part) |b| try rig.clear(b);
     for (rig.out) |b| try b.fill8(0xff, rig.s.handle);
     const offs = sg.r.offsets(3, 0);
@@ -178,31 +203,58 @@ fn lanes(c: *Ctx, count: usize) !void {
     }
 }
 
+fn long(c: *Ctx) !void {
+    var rest: usize = 0;
+    for (long_cases) |lc| {
+        const shift: u8 = @intCast(rest % 5);
+        try guarded(c, &.{.{ .p = lc.p, .w = lc.w, .kind = lc.kind, .k = shift, .v = (shift * 3) % 5 }}, lc.pool);
+        rest += 1;
+    }
+    // two streams at once: their caches sit apart and fold differently
+    try guarded(c, &.{ .{ .p = 131072, .w = 1, .k = 1, .v = 2 }, .{ .p = longest, .w = 1, .kind = .bushy, .k = 3, .v = 4 } }, 0);
+    try guarded(c, &.{ .{ .p = 32768, .w = 4, .kind = .bushy }, .{ .p = longest, .w = 2, .k = 2, .v = 1 } }, 0);
+}
+
 pub fn run(gpu: check.Gpu, aot_dir: ?[]const u8, rounds: usize) !void {
-    var env: att.Env = undefined;
-    try env.init(gpu, aot_dir);
-    defer env.deinit();
     const gpa = gpu.gpa;
     const row = try gpa.create(ref.Row);
     defer gpa.destroy(row);
     var c: Ctx = .{
-        .rig = &env.rig,
+        .rig = undefined,
         .gpa = gpa,
-        .out = try f64t.Pair.init(gpa, "tree_attention.out", D),
-        .po = try f64t.Pair.init(gpa, "tree_attention.partial_o_over_l", D),
-        .lse = try f64t.Pair.init(gpa, "tree_attention.partial_lse", H),
-        .scores = try gpa.alloc(f64, 8192 + 256),
+        .out = try f64t.Phased.init(gpa, "tree_attention.out", D),
+        .po = try f64t.Phased.init(gpa, "tree_attention.partial_o_over_l", D),
+        .lse = try f64t.Phased.init(gpa, "tree_attention.partial_lse", H),
+        .scores = try gpa.alloc(f64, longest + 256),
         .row = row,
     };
     defer gpa.free(c.scores);
-    try grid(&c);
-    std.debug.print("grid: {d} cases, {d} rows x heads compared so far\n", .{ c.cases, c.rows });
-    try lanes(&c, rounds);
-    std.debug.print("lanes: {d} cases, {d} with Triton, {d} rows x heads\n", .{ c.cases, c.triton_cases, c.rows });
+    defer for ([_]*f64t.Phased{ &c.out, &c.po, &c.lse }) |p| p.deinit();
+    {
+        var env: att.Env = undefined;
+        try env.init(gpu, aot_dir, att.capacity, st.max_streams);
+        defer env.deinit();
+        c.rig = &env.rig;
+        try grid(&c);
+        std.debug.print("grid: {d} cases, {d} rows x heads compared so far\n", .{ c.cases, c.rows });
+        try lanes(&c, rounds);
+        std.debug.print("lanes: {d} cases, {d} with Triton, {d} rows x heads\n", .{ c.cases, c.triton_cases, c.rows });
+    }
+    const short_cases = c.cases;
+    const short_rows = c.rows;
+    const short_triton = c.triton_cases;
+    {
+        var env: att.Env = undefined;
+        try env.init(gpu, aot_dir, long_cap, long_streams);
+        defer env.deinit();
+        c.rig = &env.rig;
+        try long(&c);
+    }
+    std.debug.print("long: {d} cases, {d} with Triton, {d} rows x heads\n", .{ c.cases - short_cases, c.triton_cases - short_triton, c.rows - short_rows });
     var failed = false;
-    try f64t.gate(&failed, c.out.finish("3 bf16 half-ulps of max|v| (rounded p, unrounded l, bf16 store) + 2x the fp32 score error", true));
-    try f64t.gate(&failed, c.po.finish("2 bf16 half-ulps of max|v| (rounded p, unrounded l) + 2x the fp32 score error", true));
-    try f64t.gate(&failed, c.lse.finish("the fp32 score error + 2^-20 for the fp32 exp sum", true));
+    try f64t.gate(&failed, c.out.finish("3 bf16 half-ulps of max|v| (rounded p, unrounded l, bf16 store) + 2x the fp32 score error + the fp32 sums", true));
+    try f64t.gate(&failed, c.po.finish("2 bf16 half-ulps of max|v| (rounded p, unrounded l) + 2x the fp32 score error + the fp32 sums", true));
+    try f64t.gate(&failed, c.lse.finish("the fp32 score error + the fp32 exp sum: 54u a chunk, +6u per chunk folded in a group, u = 2^-24", true));
     try check.expect(!failed, "qwen-attention-f64: an output left its float64 bound or is worse than Triton", .{});
     try check.expect(c.bad_empty == 0, "{d} empty partial slots hold a key", .{c.bad_empty});
     check.pass("qwen-attention-f64: tree attention within its float64 bounds over {d} cases, {d} rows x heads (Triton compared in {d}, {d} skipped)", .{ c.cases, c.rows, c.triton_cases, c.skipped });

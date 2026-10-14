@@ -10,6 +10,8 @@ const ref = @import("qwen_gdn_f64_ref.zig");
 
 const kern = qwen27.kernels;
 const Pair = f64t.Pair;
+const Phased = f64t.Phased;
+const Phase = f64t.Phase;
 const hk = ref.hk;
 const hv = ref.hv;
 const dk = ref.dk;
@@ -97,13 +99,11 @@ const Ctx = struct {
     gpu: check.Gpu,
     o: kern.Ops,
     rng: std.Random,
-    chain_y: Pair,
-    tree_y: Pair,
-    prompt_y: Pair,
-    prompt_last: Pair,
-    same_prompt: Pair, // the rows both paths run: prompt chunk and decode chain
-    same_decode: Pair,
-    replay_state: Pair,
+    // reported by the kernel's phase: decode (tree kernel, replay) and prompt (the chunked chain kernel)
+    chain_y: Phased, // chains: decode steps and rounds, prompt chunks
+    tree_y: Phased, // trees: decode only
+    same_y: Phased, // the rows both paths run: the decode chain (tree kernel) and the prompt chunk, identical input
+    last: Phased, // the state after the last node: replay (decode), prompt chunk
     cases: usize = 0,
     nodes: usize = 0,
     variants: [6]bool = @splat(false),
@@ -115,6 +115,10 @@ const Ctx = struct {
         const s = try c.gpu.gpa.alloc(f32, ref.state_len);
         for (s) |*x| x.* = if (zero) 0 else c.rng.floatNorm(f32) * 0.05;
         return s;
+    }
+
+    fn at(p: *Phased, ph: Phase) *Pair {
+        return &p.by[@intFromEnum(ph)];
     }
 
     fn fetch(c: *Ctx, b: cuda.DeviceBuffer) ![]u8 {
@@ -197,7 +201,7 @@ fn treeRound(c: *Ctx, data: Data, states: []const []f32, wins: []const Win, forc
     const raw = try c.fetch(y);
     errdefer gpa.free(raw);
     const in = data.inputs();
-    const pair = into orelse if (slots == 0) &c.chain_y else &c.tree_y;
+    const pair = into orelse Ctx.at(if (slots == 0) &c.chain_y else &c.tree_y, .decode);
     for (wins, 0..) |wn, i| {
         const cmp: Cmp = .{ .y = pair, .y_raw = raw, .first = @intCast(starts[i]) };
         for (0..hv) |h| try ref.tree(gpa, &cmp, &in, h, @intCast(starts[i]), par[i][0..wn.w], states[i][h * dv * dk ..][0 .. dv * dk]);
@@ -244,12 +248,12 @@ fn promptCase(c: *Ctx, rows: usize, zero: bool, decode_too: bool) !void {
     defer gpa.free(nodes);
     for (nodes, 0..) |*n, i| n.* = i;
     const in = data.inputs();
-    const cmp: Cmp = .{ .y = if (decode_too) &c.same_prompt else &c.prompt_y, .y_raw = raw, .last = &c.prompt_last, .last_raw = lraw, .len = rows };
+    const cmp: Cmp = .{ .y = Ctx.at(if (decode_too) &c.same_y else &c.chain_y, .prompt), .y_raw = raw, .last = Ctx.at(&c.last, .prompt), .last_raw = lraw, .len = rows };
     for (0..hv) |h| try ref.chain(gpa, &cmp, &in, h, nodes, st[h * dv * dk ..][0 .. dv * dk]);
     c.nodes += rows;
     c.cases += 1;
     if (!decode_too) return;
-    const dec = try treeRound(c, data, &.{st}, &.{.{ .w = rows, .kind = .chain }}, 0, &c.same_decode);
+    const dec = try treeRound(c, data, &.{st}, &.{.{ .w = rows, .kind = .chain }}, 0, Ctx.at(&c.same_y, .decode));
     defer gpa.free(dec);
     for (0..rows * hv * dv) |i| c.words_differ += @intFromBool(f64t.bfAt(raw, i) != f64t.bfAt(dec, i));
     c.words_same_rows += rows * hv * dv;
@@ -314,7 +318,7 @@ fn replayCase(c: *Ctx, streams: usize, max_rows: usize) !void {
         defer gpa.free(nodes);
         for (nodes, path[s][0..n]) |*x, r| x.* = @intCast(r);
         const in = data[l].inputs();
-        const cmp: Cmp = .{ .last = &c.replay_state, .last_raw = raw, .len = n };
+        const cmp: Cmp = .{ .last = Ctx.at(&c.last, .decode), .last_raw = raw, .len = n };
         for (0..hv) |h| try ref.chain(gpa, &cmp, &in, h, nodes, host[s][l][h * dv * dk ..][0 .. dv * dk]);
         c.nodes += n;
     };
@@ -335,14 +339,12 @@ pub fn run(gpu: check.Gpu) !void {
         .gpu = gpu,
         .o = .{ .k = &k, .s = stream },
         .rng = prng.random(),
-        .chain_y = try Pair.init(gpa, "gdn.decode_chain_y", dv),
-        .tree_y = try Pair.init(gpa, "gdn.tree_y", dv),
-        .prompt_y = try Pair.init(gpa, "gdn.prompt_chain_y", dv),
-        .prompt_last = try Pair.init(gpa, "gdn.prompt_chain_state", dk),
-        .same_prompt = try Pair.init(gpa, "gdn.identical_rows.prompt_chain_y", dv),
-        .same_decode = try Pair.init(gpa, "gdn.identical_rows.decode_chain_y", dv),
-        .replay_state = try Pair.init(gpa, "gdn.replay_state", dk),
+        .chain_y = try Phased.init(gpa, "gdn.chain_y", dv),
+        .tree_y = try Phased.init(gpa, "gdn.tree_y", dv),
+        .same_y = try Phased.init(gpa, "gdn.identical_rows_y", dv),
+        .last = try Phased.init(gpa, "gdn.state", dk),
     };
+    defer for ([_]*Phased{ &c.chain_y, &c.tree_y, &c.same_y, &c.last }) |p| p.deinit();
     for ([_]usize{ 1, 2, 3, 4, 8, 16, 17, 32, 64, 128 }) |w| {
         try treeCase(&c, &.{.{ .w = w, .kind = .chain }}, &.{0});
         if (w >= 3) try treeCase(&c, &.{.{ .w = w, .kind = .bushy }}, if (w >= 16) &widen else &.{0});
@@ -367,11 +369,8 @@ pub fn run(gpu: check.Gpu) !void {
     var failed = false;
     try f64t.gate(&failed, c.chain_y.finish("fp32 steps 32 x 2^-24 of the row norm, decayed by g down the path, through |q|, + bf16 half-ulp", true));
     try f64t.gate(&failed, c.tree_y.finish("fp32 steps 32 x 2^-24 of the row norm, decayed by g down the tree path, through |q|, + bf16 half-ulp", true));
-    try f64t.gate(&failed, c.prompt_y.finish("the same bound on the same rows as the decode chain", true));
-    try f64t.gate(&failed, c.same_prompt.finish("identical rows through the prompt chain kernel", true));
-    try f64t.gate(&failed, c.same_decode.finish("identical rows through the decode chain (tree kernel)", true));
-    try f64t.gate(&failed, c.prompt_last.finish("fp32 steps 32 x 2^-24 of the row norm, decayed by g (state element)", true));
-    try f64t.gate(&failed, c.replay_state.finish("fp32 steps 32 x 2^-24 of the row norm, decayed by g (state element)", true));
+    try f64t.gate(&failed, c.same_y.finish("the same bound on identical rows: the decode chain (tree kernel) and the prompt chain kernel", true));
+    try f64t.gate(&failed, c.last.finish("fp32 steps 32 x 2^-24 of the row norm, decayed by g (state element)", true));
     std.debug.print("identical rows: the prompt and decode chains' y differ in {d} of {d} bf16 words\n", .{ c.words_differ, c.words_same_rows });
     try check.expect(!failed, "qwen-gdn-f64: an output left its float64 bound", .{});
     try check.expect(c.unchanged_bad == 0, "{d} empty replays changed a state", .{c.unchanged_bad});

@@ -10,7 +10,7 @@ const base = @import("qwen_prep_tests.zig");
 const tri = qwen27.triton;
 const prep = qwen27.prep_native;
 const Buf = base.Buf;
-const Pair = f64t.Pair;
+const Phased = f64t.Phased;
 const keep = base.keep;
 const C = base.gdn_shape.c;
 const KH = base.gdn_shape.kh;
@@ -21,15 +21,20 @@ const HKV = base.attn_shape.kv_heads;
 const D = base.attn_shape.dim;
 const HALF = base.attn_shape.half;
 const rows_list = [_]usize{ 1, 5, 64, 513, 2048 };
+const decode_rows = f64t.decode_rows; // a prompt-sized call is also run on its first rows of this many, the decode bucket
 const serve_pos_max: u64 = 262143; // the longest context the model serves; rows past it are the stress class
 const eps24 = 0x1p-24;
 
 const Group = struct {
-    pairs: []Pair,
+    pairs: []Phased,
 
     fn init(gpa: std.mem.Allocator, prefix: []const u8, names: []const []const u8, cols: []const usize) !Group {
-        const pairs = try gpa.alloc(Pair, names.len);
-        for (pairs, names, cols) |*p, nm, c| p.* = try Pair.init(gpa, try std.fmt.allocPrint(gpa, "{s}{s}", .{ prefix, nm }), c);
+        const pairs = try gpa.alloc(Phased, names.len);
+        for (pairs, names, cols) |*p, nm, c| {
+            const full = try std.fmt.allocPrint(gpa, "{s}{s}", .{ prefix, nm });
+            defer gpa.free(full);
+            p.* = try Phased.init(gpa, full, c);
+        }
         return .{ .pairs = pairs };
     }
 };
@@ -154,6 +159,50 @@ fn gdnRow(d: *const base.Gdn, row: usize, kind: usize, multi: bool, o: *GdnRow) 
     }
 }
 
+const GdnIn = struct { qkv: u64, cs: u64, cw: u64, win: u64, sid: ?u64, a: u64, b: u64, alog: u64, dtb: u64 };
+const GdnBytes = [2][5][]const u8; // [native, replay][q, k, v, g, beta]
+
+fn gdnSizes(rows: usize) [5]usize {
+    return .{ rows * KH * DK * 2, rows * KH * DK * 2, rows * VH * DK * 2, rows * VH * 4, rows * VH * 4 };
+}
+
+fn gdnLaunch(r: *Rig, i: GdnIn, outs: *const [2][5]Buf, rows: usize) !void {
+    const n = outs[0];
+    try r.native.gdnPre(r.s, i.qkv, i.cs, i.cw, i.win, i.sid, i.a, i.b, i.alog, i.dtb, n[0].ptr(), n[1].ptr(), n[2].ptr(), n[3].ptr(), n[4].ptr(), rows, KH, VH, DK, C, keep);
+    const o = outs[1];
+    if (r.replay) |t| try t.gdnPre(i.qkv, i.cs, i.cw, i.win, i.sid, i.a, i.b, i.alog, i.dtb, o[0].ptr(), o[1].ptr(), o[2].ptr(), o[3].ptr(), o[4].ptr(), rows, base.gdn_shape);
+}
+
+fn gdnFetch(r: *Rig, outs: *const [2][5]Buf, rows: usize, bytes: *GdnBytes) !void {
+    const sizes = gdnSizes(rows);
+    for (bytes, outs, 0..) |*bs, *os, w| for (bs, os, sizes) |*x, o, n| {
+        x.* = if (w == 1 and r.replay == null) &[_]u8{} else try r.fetch(o, n);
+    };
+}
+
+fn gdnFree(gpa: std.mem.Allocator, bytes: *const GdnBytes) void {
+    for (bytes) |bs| for (bs) |x| if (x.len > 0) gpa.free(x);
+}
+
+// Row `rw` of a launch of `rows` rows (which picks the phase) against the reference row.
+fn gdnAdd(grp: *Group, rows: usize, bytes: *const GdnBytes, tri_on: bool, row: *const GdnRow, rw: usize) void {
+    const pr = grp.pairs;
+    for (0..KH * DK) |i| {
+        const at = rw * KH * DK + i;
+        pr[0].at(rows).add(i % DK, f64t.bfAt(bytes[0][0], at), if (tri_on) f64t.bfAt(bytes[1][0], at) else null, row.q[i], row.qb[i], row.qf[i / DK]);
+        pr[1].at(rows).add(i % DK, f64t.bfAt(bytes[0][1], at), if (tri_on) f64t.bfAt(bytes[1][1], at) else null, row.k[i], row.kb[i], row.kf[i / DK]);
+    }
+    for (0..VH * DK) |i| {
+        const at = rw * VH * DK + i;
+        pr[2].at(rows).add(i % DK, f64t.bfAt(bytes[0][2], at), if (tri_on) f64t.bfAt(bytes[1][2], at) else null, row.v[i], row.vb[i], row.vf[i / DK]);
+    }
+    for (0..VH) |hv| {
+        const at = rw * VH + hv;
+        pr[3].at(rows).add(hv, f64t.f32At(bytes[0][3], at), if (tri_on) f64t.f32At(bytes[1][3], at) else null, row.g[hv], row.gb[hv], 1e-30);
+        pr[4].at(rows).add(hv, f64t.f32At(bytes[0][4], at), if (tri_on) f64t.f32At(bytes[1][4], at) else null, row.beta[hv], row.bb[hv], 1e-30);
+    }
+}
+
 fn gdnPass(r: *Rig, d: *const base.Gdn, al: Align, grp: *Group, row: *GdnRow) !void {
     const gpa = r.gpu.gpa;
     var qkv = try r.up(std.mem.sliceAsBytes(d.qkv), al.sh[0]);
@@ -175,39 +224,31 @@ fn gdnPass(r: *Rig, d: *const base.Gdn, al: Align, grp: *Group, row: *GdnRow) !v
         defer win.free();
         var sid = try r.up(std.mem.sliceAsBytes(d.sid[kind]), al.sh[8]);
         defer sid.free();
+        const gin: GdnIn = .{ .qkv = qkv.ptr(), .cs = cs.ptr(), .cw = cw.ptr(), .win = win.ptr(), .sid = if (al.multi) sid.ptr() else null, .a = a.ptr(), .b = b.ptr(), .alog = alog.ptr(), .dtb = dtb.ptr() };
         for (rows_list) |rows| {
-            const sizes = [5]usize{ rows * KH * DK * 2, rows * KH * DK * 2, rows * VH * DK * 2, rows * VH * 4, rows * VH * 4 };
             var outs: [2][5]Buf = undefined;
-            var bytes: [2][5][]const u8 = undefined;
-            for (&outs) |*os| for (os, sizes, 0..) |*x, n, i| {
+            for (&outs) |*os| for (os, gdnSizes(rows), 0..) |*x, n, i| {
                 x.* = try r.alloc(n, al.sh[9 + i]);
             };
             defer for (&outs) |*os| for (os) |*x| x.free();
-            const sid_ptr: ?u64 = if (al.multi) sid.ptr() else null;
-            try r.native.gdnPre(r.s, qkv.ptr(), cs.ptr(), cw.ptr(), win.ptr(), sid_ptr, a.ptr(), b.ptr(), alog.ptr(), dtb.ptr(), outs[0][0].ptr(), outs[0][1].ptr(), outs[0][2].ptr(), outs[0][3].ptr(), outs[0][4].ptr(), rows, KH, VH, DK, C, keep);
-            if (r.replay) |t| try t.gdnPre(qkv.ptr(), cs.ptr(), cw.ptr(), win.ptr(), sid_ptr, a.ptr(), b.ptr(), alog.ptr(), dtb.ptr(), outs[1][0].ptr(), outs[1][1].ptr(), outs[1][2].ptr(), outs[1][3].ptr(), outs[1][4].ptr(), rows, base.gdn_shape);
-            for (&bytes, &outs, 0..) |*bs, *os, w| for (bs, os, sizes) |*x, o, n| {
-                x.* = if (w == 1 and r.replay == null) &[_]u8{} else try r.fetch(o, n);
-            };
-            defer for (&bytes) |*bs| for (bs) |x| if (x.len > 0) gpa.free(x);
+            try gdnLaunch(r, gin, &outs, rows);
+            var bytes: GdnBytes = undefined;
+            try gdnFetch(r, &outs, rows, &bytes);
+            defer gdnFree(gpa, &bytes);
             for (0..rows) |rw| {
                 gdnRow(d, rw, kind, al.multi, row);
-                const tr = r.replay != null;
-                for (0..KH * DK) |i| {
-                    const at = rw * KH * DK + i;
-                    grp.pairs[0].add(i % DK, f64t.bfAt(bytes[0][0], at), if (tr) f64t.bfAt(bytes[1][0], at) else null, row.q[i], row.qb[i], row.qf[i / DK]);
-                    grp.pairs[1].add(i % DK, f64t.bfAt(bytes[0][1], at), if (tr) f64t.bfAt(bytes[1][1], at) else null, row.k[i], row.kb[i], row.kf[i / DK]);
-                }
-                for (0..VH * DK) |i| {
-                    const at = rw * VH * DK + i;
-                    grp.pairs[2].add(i % DK, f64t.bfAt(bytes[0][2], at), if (tr) f64t.bfAt(bytes[1][2], at) else null, row.v[i], row.vb[i], row.vf[i / DK]);
-                }
-                for (0..VH) |hv| {
-                    const at = rw * VH + hv;
-                    grp.pairs[3].add(hv, f64t.f32At(bytes[0][3], at), if (tr) f64t.f32At(bytes[1][3], at) else null, row.g[hv], row.gb[hv], 1e-30);
-                    grp.pairs[4].add(hv, f64t.f32At(bytes[0][4], at), if (tr) f64t.f32At(bytes[1][4], at) else null, row.beta[hv], row.bb[hv], 1e-30);
-                }
+                gdnAdd(grp, rows, &bytes, r.replay != null, row, rw);
                 r.rows_done += 1;
+            }
+            if (rows <= decode_rows) continue;
+            // the same rows through the decode-sized launch: the first rows of the same buffers, rows = decode_rows
+            try gdnLaunch(r, gin, &outs, decode_rows);
+            var head: GdnBytes = undefined;
+            try gdnFetch(r, &outs, decode_rows, &head);
+            defer gdnFree(gpa, &head);
+            for (0..decode_rows) |rw| {
+                gdnRow(d, rw, kind, al.multi, row);
+                gdnAdd(grp, decode_rows, &head, r.replay != null, row, rw);
             }
         }
     }
@@ -246,6 +287,45 @@ fn attnHead(t: *const base.Attn, row: usize, head: usize, o: *AttnRow) void {
     o.floor = big * 0x1p-7;
 }
 
+const AttnBytes = [2][2][]const u8; // [native, replay][q, k]
+
+fn attnSizes(rows: usize) [2]usize {
+    return .{ rows * H * D * 2, rows * HKV * D * 2 };
+}
+
+fn attnLaunch(r: *Rig, i: [6]u64, outs: *const [2][2]Buf, rows: usize) !void {
+    try r.native.attnPrep(r.s, i[0], i[1], i[2], i[3], i[4], i[5], outs[0][0].ptr(), outs[0][1].ptr(), rows, H, HKV, D, HALF, 1e-6);
+    if (r.replay) |tr| try tr.attnPrep(i[0], i[1], i[2], i[3], i[4], i[5], outs[1][0].ptr(), outs[1][1].ptr(), rows, base.attn_shape, 1e-6);
+}
+
+fn attnFetch(r: *Rig, outs: *const [2][2]Buf, rows: usize, bytes: *AttnBytes) !void {
+    const sizes = attnSizes(rows);
+    for (bytes, outs, 0..) |*bs, *os, w| for (bs, os, sizes) |*x, o, n| {
+        x.* = if (w == 1 and r.replay == null) &[_]u8{} else try r.fetch(o, n);
+    };
+}
+
+fn attnFree(gpa: std.mem.Allocator, bytes: *const AttnBytes) void {
+    for (bytes) |bs| for (bs) |x| if (x.len > 0) gpa.free(x);
+}
+
+// The first `rows` rows of a launch of `rows` rows (which picks the phase) against the reference.
+fn attnAdd(grp: *Group, t: *const base.Attn, rows: usize, bytes: *const AttnBytes, tri_on: bool, row: *AttnRow) void {
+    for (0..rows) |rw| {
+        const stress = @abs(@as(i64, t.pos[rw])) > serve_pos_max;
+        for (0..H + HKV) |head| {
+            attnHead(t, rw, head, row);
+            const which: usize = (if (head < H) @as(usize, 0) else 1) + (if (stress) @as(usize, 2) else 0);
+            const out: usize = if (head < H) (rw * H + head) * D else (rw * HKV + head - H) * D;
+            const k: usize = if (head < H) 0 else 1;
+            for (0..D) |i| {
+                const tg: ?f64 = if (tri_on) f64t.bfAt(bytes[1][k], out + i) else null;
+                grp.pairs[which].at(rows).add(i, f64t.bfAt(bytes[0][k], out + i), tg, row.want[i], row.bound[i], row.floor);
+            }
+        }
+    }
+}
+
 fn attnPass(r: *Rig, t: *const base.Attn, al: Align, grp: *Group, row: *AttnRow) !void {
     const gpa = r.gpu.gpa;
     var qg = try r.up(std.mem.sliceAsBytes(t.qg), al.sh[0]);
@@ -260,33 +340,26 @@ fn attnPass(r: *Rig, t: *const base.Attn, al: Align, grp: *Group, row: *AttnRow)
     defer pos.free();
     var inv = try r.up(std.mem.sliceAsBytes(&t.inv), al.sh[5]);
     defer inv.free();
+    const ain = [6]u64{ qg.ptr(), kv.ptr(), qn.ptr(), kn.ptr(), pos.ptr(), inv.ptr() };
     for (rows_list) |rows| {
-        const sizes = [2]usize{ rows * H * D * 2, rows * HKV * D * 2 };
         var outs: [2][2]Buf = undefined;
-        for (&outs) |*os| for (os, sizes, 0..) |*x, n, i| {
+        for (&outs) |*os| for (os, attnSizes(rows), 0..) |*x, n, i| {
             x.* = try r.alloc(n, al.sh[6 + i]);
         };
         defer for (&outs) |*os| for (os) |*x| x.free();
-        try r.native.attnPrep(r.s, qg.ptr(), kv.ptr(), qn.ptr(), kn.ptr(), pos.ptr(), inv.ptr(), outs[0][0].ptr(), outs[0][1].ptr(), rows, H, HKV, D, HALF, 1e-6);
-        if (r.replay) |tr| try tr.attnPrep(qg.ptr(), kv.ptr(), qn.ptr(), kn.ptr(), pos.ptr(), inv.ptr(), outs[1][0].ptr(), outs[1][1].ptr(), rows, base.attn_shape, 1e-6);
-        const nat = [2][]u8{ try r.fetch(outs[0][0], sizes[0]), try r.fetch(outs[0][1], sizes[1]) };
-        defer for (nat) |x| gpa.free(x);
-        const rep = if (r.replay != null) [2][]u8{ try r.fetch(outs[1][0], sizes[0]), try r.fetch(outs[1][1], sizes[1]) } else [2][]const u8{ &[_]u8{}, &[_]u8{} };
-        defer for (rep) |x| if (x.len > 0) gpa.free(x);
-        for (0..rows) |rw| {
-            const stress = @abs(@as(i64, t.pos[rw])) > serve_pos_max;
-            for (0..H + HKV) |head| {
-                attnHead(t, rw, head, row);
-                const which: usize = (if (head < H) @as(usize, 0) else 1) + (if (stress) @as(usize, 2) else 0);
-                const out: usize = if (head < H) (rw * H + head) * D else (rw * HKV + head - H) * D;
-                const k: usize = if (head < H) 0 else 1;
-                for (0..D) |i| {
-                    const tg: ?f64 = if (r.replay != null) f64t.bfAt(rep[k], out + i) else null;
-                    grp.pairs[which].add(i, f64t.bfAt(nat[k], out + i), tg, row.want[i], row.bound[i], row.floor);
-                }
-            }
-            r.rows_done += 1;
-        }
+        try attnLaunch(r, ain, &outs, rows);
+        var bytes: AttnBytes = undefined;
+        try attnFetch(r, &outs, rows, &bytes);
+        defer attnFree(gpa, &bytes);
+        attnAdd(grp, t, rows, &bytes, r.replay != null, row);
+        r.rows_done += rows;
+        if (rows <= decode_rows) continue;
+        // the same rows through the decode-sized launch: the first rows of the same buffers, rows = decode_rows
+        try attnLaunch(r, ain, &outs, decode_rows);
+        var head: AttnBytes = undefined;
+        try attnFetch(r, &outs, decode_rows, &head);
+        defer attnFree(gpa, &head);
+        attnAdd(grp, t, decode_rows, &head, r.replay != null, row);
     }
 }
 
