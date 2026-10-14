@@ -14,7 +14,7 @@ The test runs the whole 40-layer engine (prefill, one-row steps from an empty st
 and compares at every norm and every MoE layer, so the first differing op is the first line it prints.
 `--teacher` puts the dump's bytes in place of each compared value, so one layer's fault does not flow on.
 
-Served: `tensorfold-native serve MODEL --no-drafts` (with `TENSORFOLD_CUDA_KERNELS` set to the captured kernel set)
+Served: `tensorfold-native serve MODEL --no-drafts` (on a GB10 with `TENSORFOLD_CUDA_KERNELS` unset: the built-in kernels alone; a captured kernel set is optional there)
 answers like the Python 0.6.6 engine run serial. `serve_check.py record URL FIXTURE` records a Python server's prompt
 ids (/tokenize), greedy reply ids (`return_token_ids`, temperature 0, 256 tokens, thinking off) and parsed tool calls;
 `serve_check.py check URL FIXTURE` reruns the fixture against any server and compares the chat template's ids (a), the
@@ -73,7 +73,7 @@ keyed draws, so a reply equals the same request alone. Prompts still run one at 
 `../minicpm/fixture.json` holds `serve_check.py record` output from a Python 0.6.6 MiniCPM-V 4.7 server (serial, drafts
 off, thinking off): six chat requests with their prompt ids, greedy reply ids and parsed tool calls. The native server
 (`minicpmv4_7`) answers it token for token, drafted and with `--draft-off`, alone and with two clients at once:
-`serve_check.py check URL ../minicpm/fixture.json [--draft-off]`. It uses the same captured kernel set as Qwen3.6.
+`serve_check.py check URL ../minicpm/fixture.json [--draft-off]`. It uses the same kernels as Qwen3.6.
 
 ## Native prep kernels
 
@@ -96,6 +96,10 @@ first instruction and marks the kernel `pdl` in `aot.json`. The loader launches 
 rebuilt SASS has the same instructions plus the wait (`ACQBULK`, ahead of every memory access); on some kernels ptxas
 also renames registers or reorders independent instructions around it, so the checks above must pass on the new set,
 as they do on the captured one. Point `TENSORFOLD_CUDA_KERNELS` at it.
+
+## Without a captured set
+
+`qwen36-layers` and `qwen36-mtp` take `native` in place of the kernel set: the engine then runs on the built-in kernels alone, and a launch none of them covers stops with `QwenNeedsCapturedKernels`. Both pass byte-equal that way on a GB10, as do the serve, MTP, lanes and cache checks with `TENSORFOLD_CUDA_KERNELS` unset.
 
 ## Built-in row glue
 
