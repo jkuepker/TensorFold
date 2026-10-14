@@ -20,31 +20,31 @@ const hd = glue.head_dim;
 const vocab = 4096;
 
 // Row counts the engine serves: decode 1, lane and verify rows 2-16, tree windows, prompt chunks and their remainders.
-const serve_rows = [_]usize{
+pub const serve_rows = [_]usize{
     1,  2,  3,  4,  5,  6,  7,   8,   9,   10,  11,  12,  13,  14,  15,   16,   17,   18,   19,   20,   21,   22,   23,   24,   25, 26, 27, 28, 29, 30, 31, 32,
     35, 37, 40, 41, 44, 64, 128, 299, 300, 379, 380, 387, 619, 626, 1023, 1024, 1501, 1502, 1509, 2356, 2357, 2358, 2360, 2361,
 };
-const sums_rows = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128 };
-const path_rows = [_]usize{
+pub const sums_rows = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128 };
+pub const path_rows = [_]usize{
     1,  2,  3,  4,  5,  6,  7,   8,   9,   10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
     35, 37, 40, 41, 44, 64, 128, 129, 200,
 };
 
-const Kind = enum { normal, outliers, zero, special, subnormal, tiny, huge, wide, spread };
+pub const Kind = enum { normal, outliers, zero, special, subnormal, tiny, huge, wide, spread };
 
-fn bf(f: f32) u16 {
+pub fn bf(f: f32) u16 {
     const u: u32 = @bitCast(f);
     if (f != f) return 0x7fc0;
     return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
-fn bf32(v: u16) f32 {
+pub fn bf32(v: u16) f32 {
     return @bitCast(@as(u32, v) << 16);
 }
 
-const Placed = struct { buf: cuda.DeviceBuffer, ptr: u64 };
+pub const Placed = struct { buf: cuda.DeviceBuffer, ptr: u64 };
 
-const Rig = struct {
+pub const Rig = struct {
     gpu: Gpu,
     s: cuda.Stream,
     native: glue.Native,
@@ -61,17 +61,17 @@ const Rig = struct {
     kinds: []Kind = &.{},
     oracle: ?[]const u8 = null, // the Python engine's dumps (qwen36/capture.py): real y rows for group_sums
 
-    fn rand(r: *Rig) std.Random {
+    pub fn rand(r: *Rig) std.Random {
         return r.prng.random();
     }
 
-    fn release(r: *Rig) void {
+    pub fn release(r: *Rig) void {
         for (r.pool[0..r.held]) |*b| b.free();
         r.held = 0;
     }
 
     // Bytes on the device, `ptr` 16-aligned or (for a pointer an entry lists as unaligned) 4 bytes past that.
-    fn up(r: *Rig, data: []const u8, aligned: bool) !Placed {
+    pub fn up(r: *Rig, data: []const u8, aligned: bool) !Placed {
         const pad: usize = if (aligned) 0 else 4;
         const host = try r.gpu.gpa.alloc(u8, data.len + pad + 16);
         defer r.gpu.gpa.free(host);
@@ -84,7 +84,7 @@ const Rig = struct {
     }
 
     // An output the kernel must fill whole: 0xff bytes first, so an unwritten or overrun word cannot match.
-    fn out(r: *Rig, n: usize) !cuda.DeviceBuffer {
+    pub fn out(r: *Rig, n: usize) !cuda.DeviceBuffer {
         const b = try cuda.DeviceBuffer.alloc(r.gpu.d, n + 16);
         try b.fill8(0xff, r.s.handle);
         r.pool[r.held] = b;
@@ -134,7 +134,7 @@ const Rig = struct {
 
     // ---- inputs
 
-    fn pickKind(r: *Rig) Kind {
+    pub fn pickKind(r: *Rig) Kind {
         const v = r.rand().uintLessThan(u32, 100);
         return if (v < 40) .normal else if (v < 50) .outliers else if (v < 55) .zero else if (v < 60) .special else if (v < 65) .subnormal else if (v < 70) .tiny else if (v < 75) .huge else if (v < 82) .wide else if (v < 94) .spread else .normal;
     }
@@ -145,7 +145,7 @@ const Rig = struct {
         return @exp(lo + r.rand().float(f32) * (hi - lo));
     }
 
-    fn fillRow(r: *Rig, row: []u16, kind: Kind, scale: f32) void {
+    pub fn fillRow(r: *Rig, row: []u16, kind: Kind, scale: f32) void {
         const rng = r.rand();
         const mag = r.magnitude() * scale;
         for (row) |*o| {
@@ -181,7 +181,7 @@ const Rig = struct {
     }
 
     // Norm weights around 1, some negative.
-    fn weights(r: *Rig, n: usize) ![]u16 {
+    pub fn weights(r: *Rig, n: usize) ![]u16 {
         const buf = try r.gpu.gpa.alloc(u16, n);
         const rng = r.rand();
         for (buf) |*o| o.* = bf(1.0 + (rng.float(f32) + rng.float(f32) + rng.float(f32) - 1.5) * 1.2);
@@ -202,7 +202,7 @@ fn div16(spec: anytype, name: []const u8) bool {
     unreachable;
 }
 
-fn bytes(s: []const u16) []const u8 {
+pub fn bytes(s: []const u16) []const u8 {
     return std.mem.sliceAsBytes(s);
 }
 
@@ -349,7 +349,7 @@ fn realSums(r: *Rig, spec: anytype, oracle: []const u8) !void {
 }
 
 // A forest of `rows` nodes: parents below the child (-1 at roots), shaped by `shape`.
-fn forest(r: *Rig, parents: []i32, shape: usize) void {
+pub fn forest(r: *Rig, parents: []i32, shape: usize) void {
     const rng = r.rand();
     for (parents, 0..) |*p, i| {
         p.* = switch (shape) {
