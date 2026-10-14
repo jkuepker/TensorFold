@@ -140,3 +140,6 @@ lengths, a unique first line each so nothing resumes; median time to first token
 
 The server process peaks at 31.3 GiB (nvidia-smi) during the 65,536-token prompts; vLLM holds its memory
 reservation, 72.9 GB at 0.60.
+
+The native CUDA server (`tensorfold-native serve`) loads this checkpoint too; its decode, prefill and memory against the
+Python engine are in the Receipts of [MiniCPM-V 4.7 on the native CUDA server](minicpm-v-4.7-native.md#receipts).

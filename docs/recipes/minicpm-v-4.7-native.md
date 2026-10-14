@@ -166,12 +166,230 @@ Quality, `localeval quality --bench mmlu --limit 25 --max-tokens 2048 --judge no
 | Python 0.6.6, MLX 4-bit | 83.6 |
 | vLLM, NVFP4 W4A16 | 83.1 |
 
+## Receipts
+
+What `CONTRIBUTING.md` asks of a new backend, measured on commit `fedb84fc` (this branch on top of upstream v1.0.10)
+with the native server against the 0.6.6 Python engine, same machine, same checkpoints, greedy, one server process at
+a time. Every figure below comes from `tools/bench_openai.py`, `tools/bench_concurrent.py` and `tools/bench_cache.py`
+run as written in this section. Speed is quoted only where the native and Python replies have the same token-ID hash.
+v1.0.10 has no native `qwen3_5_moe` or `minicpmv4_7` path, so there is no before row; the 0.6.6 Python engine is
+the applicable standard here, and vLLM was not rerun.
+
+### Setup
+
+| | |
+| --- | --- |
+| Native build | commit `fedb84fc`, Zig 0.17.0, `zig build native -Dsm=121` with nvcc 13.3.73 (CUDA 13.3), built-in kernels, no captured set (`TENSORFOLD_CUDA_KERNELS` unset), `libcuda` 610.43.02 from NVIDIA's NGC 26.07 PyTorch image first on the loader path (see Toolkit and driver) |
+| Native build, nvcc 13.0 | the same commit built with nvcc 13.0.88 and run on the host's own `libcuda` (driver 580.173.02), no setup beyond the README |
+| Python engine | TensorFold 0.6.6 in `nvcr.io/nvidia/pytorch:26.07-py3` (torch 2.13.0a0+nv26.07, Triton 3.7.1, CUDA 13.3), its own CUDA 13.3 userland; Qwen3.6 on the container's 0.6.6 tree, MiniCPM-V 4.7 on that tree plus its MiniCPM-V 4.7 recipe (not in a release) |
+| Hardware | NVIDIA DGX Spark, GB10 (sm_121, 48 SMs), 128 GB unified memory (121 GiB visible), 20 Arm cores; the memory is shared with the host, and one other model server (vLLM, NVFP4 Qwen3.6, 56.5 GiB resident, idle, GPU 0% busy) stayed loaded throughout, as in the Measurements above |
+| OS | Ubuntu 24.04.5, Linux 7.0.0-1019-nvidia, NVIDIA driver 580.173.02 |
+| Checkpoints | MiniCPM-V 4.7: `kuepker/MiniCPM-V-4.7-35B-A3B-MLX-4bit-TensorFold` revision `0aee82655c3bdb7135099cd368af7e92235d066f` (the four weight shards, the vision file and the tokenizer have the repository's SHA-256). Qwen3.6-35B-A3B: `TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP` snapshot `81169a9bc511a27c1b4eedb77a2cd98ced431847` (shards and tokenizer have the repository's current SHA-256). Drafts for both: `mtp-4bit.safetensors`, SHA-256 `c4d7d795b06eaf39c90520940887d81c71abeda3f04f892c2ef0fbc5a8970eb4`, named by `TF_QWEN36_MTP` on both engines |
+| Clients | Python 3.12.3, the standard-library tools of this tree |
+| Admission | `TENSORFOLD_CUDA_MEMORY_LIMIT_GB=44` for the native server (the Python engine admits 46.9 GiB on this machine); nothing was raised |
+
+The prompts are rebuilt as follows. Read these files of Python 3.12.3's standard library
+(`/usr/lib/python3.12/<name>.py` in the Python container), each followed by one newline, in this order: typing,
+argparse, subprocess, inspect, dataclasses, enum, functools, collections/__init__, logging/__init__, threading (the 2k
+to 64k prompts, 188,719 tokens, text SHA-256 prefix `7608ce4d2fd551b0`); then tarfile, zipfile/__init__, _pydecimal,
+pydoc, asyncio/base_events, http/client, email/_header_value_parser, ssl, socket, re/_parser, ast (the 128k and
+262,000-token prompts, 430,794 tokens in all, text SHA-256 prefix `98b8e4a1d1674cef`). Encode the concatenation with
+the checkpoint's `tokenizer.json` (`tokenizers` 0.23.1, `add_special_tokens=False`) and take the first N ids; the 64k
+array is a prefix of the 128k and 262,000 ones, and MiniCPM-V 4.7 and Qwen3.6 give the same ids for this text. The
+JSON arrays' SHA-256 (of `json.dumps` of the list):
+
+| Tokens | SHA-256 |
+| ---: | --- |
+| 2,048 | `e625ad3e95df6ee4686f1cc63941c09b48c764e86b489014fde7530dfd53dadc` |
+| 8,192 | `2ad7a1f7a191411ed7c81fed3698e68461f409ce2e233f9711bcfe1de9afde29` |
+| 32,768 | `f6c45699bb307b58e26270b712ec64c125b07dc850b5026988c76193b9a1927d` |
+| 65,536 | `400de21c9573c33ae8704c700ac902a3dd05c899b9894414c0496677eee7f37e` |
+| 131,072 | `17d41a34c5c2660d5720070dfc183e862892ad0be071b8986e480649f682f5fa` |
+| 262,000 | `f870d5baf5df513a4446c7f693a775b512eab60079b36f8ebb50626ac68a7428` |
+
+Each report also records its `fixture_sha256`.
+
+### Commands
+
+Decode and concurrency, once per model and engine, drafted and with `--no-drafts`:
+
+```bash
+tensorfold-native serve <model> --name bench --parallel 4 --context 8192 --no-thinking [--no-drafts]
+python3 tools/bench_openai.py http://127.0.0.1:8097 bench --tokens 256 --reps 3 --temperatures 0 --output decode.json
+python3 tools/bench_concurrent.py http://127.0.0.1:8097 bench --tokens 256 --reps 3 --temperatures 0 --levels 1,4 \
+  --alone --serial --output concurrent.json
+```
+
+The Python engine ran `tensorfold serve <model> --name bench --parallel 4 --context 8192 --no-thinking [--no-drafts]`.
+`--serial` (which runs the alone replies again with `"draft": false`) is on the drafted servers only; on the
+`--no-drafts` server every request is serial and `--alone` is the check. Each decode run starts a fresh server, sends
+one unrelated short request, then runs the two tools; the whole sweep ran twice with the engine order reversed in the
+second round, and the tables show both rounds as `first / second`.
+
+Cold prefill, a fresh server for every cell and the prompt cache off:
+
+```bash
+tensorfold-native serve <model> --name bench --parallel 1 --context 66560 --no-thinking --prompt-cache-gib 0
+python3 tools/bench_cache.py http://127.0.0.1:8097 bench --tokens 32 --repeats 2 --streams 1 \
+  --prompt-file ids-65536.json --expected-prompt-tokens 65536 --require-cold --output cache-65536.json
+```
+
+The window was 66,560 tokens for 2k to 64k, 132,096 for 128k and 262,144 for the 262,000-token prompt (repeats 1 for
+the last two). Every cell was preceded by the same short warm-up request. Native cold prefill is the median time to
+first token of the three rows of one process; each row reports `cache_state: cold` with zero cached tokens. The Python
+0.6.6 engine resumes a repeated prompt from the state it kept even with `--prompt-cache-gib 0` (its second and third
+rows report cached tokens), so its figure is the median of the first request of three fresh processes (one for 128k
+and 262,000). Prefill tok/s is the prompt length over that time to first token, which includes sampling the first
+token.
+
+### Exactness
+
+Before any speed was quoted, every cell below was compared by the token-ID hash (`token_sha`) between the native and
+the Python replies: 44 of 44 cells are equal (8 single-stream, 8 single-stream on the nvcc 13.0 build, 16 concurrent,
+12 cold prefill, each over all its reps and both rounds). In `bench_concurrent`, every concurrent reply equals the
+same request alone (`alone`, 6 of 6 at one stream and 24 of 24 at four), and on the drafted servers every alone reply
+equals its `"draft": false` run (`serial`, 2 of 2 for each cell). The nvcc 13.3 build passes `zig build test` on this
+machine (829 of 835 passed, 6 skipped: they need a Metal device or cluster and other-checkpoint inputs), and the 17
+model-free tests of `tools/tests` pass. The Parity section's fixture checks (`serve_check.py`, `mtp_check.py`,
+`lanes_check.py`, `cache_check.py`) ran on the nvcc 13.0 build of this commit and all passed; they were not rerun on
+the nvcc 13.3 build, whose evidence is the cells above.
+
+### Decode
+
+Greedy, 256 tokens, median of 3 reps, tok/s of the decode span. Prompts are `bench_openai`'s: a 14-token completion
+(code) and a 31-token chat turn (chat).
+
+| Model | Mode | Prompt | Native, nvcc 13.3 | Python 0.6.6 | Native / Python | Tokens |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| MiniCPM-V 4.7 | drafted | code | 189.8 / 189.6 | 189.8 / 189.4 | 1.001 | equal |
+| MiniCPM-V 4.7 | drafted | chat | 142.8 / 142.7 | 141.5 / 141.4 | 1.009 | equal |
+| MiniCPM-V 4.7 | `--no-drafts` | code | 92.5 / 92.7 | 92.7 / 92.8 | 0.999 | equal |
+| MiniCPM-V 4.7 | `--no-drafts` | chat | 92.5 / 92.8 | 92.4 / 92.6 | 1.001 | equal |
+| Qwen3.6-35B-A3B | drafted | code | 212.1 / 213.6 | 212.4 / 212.8 | 1.001 | equal |
+| Qwen3.6-35B-A3B | drafted | chat | 155.2 / 156.0 | 161.9 / 162.3 | 0.960 | equal |
+| Qwen3.6-35B-A3B | `--no-drafts` | code | 92.9 / 92.7 | 92.1 / 92.7 | 1.004 | equal |
+| Qwen3.6-35B-A3B | `--no-drafts` | chat | 92.9 / 92.6 | 92.5 / 92.5 | 1.002 | equal |
+
+The native server is within 1% of the Python engine on seven of the eight rows. Qwen3.6 drafted on the chat prompt is
+4% under it (155.2 and 156.0 against 161.9 and 162.3), in both rounds; that is the gap the TODO below names. The same
+commit built with nvcc 13.0 and run on the host's own `libcuda`, one round:
+
+| Model | Mode | Prompt | Native, nvcc 13.0 | Native, 13.3 | Python 0.6.6 | Tokens vs Python |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| MiniCPM-V 4.7 | drafted | code | 186.5 | 189.8 | 189.8 | equal |
+| MiniCPM-V 4.7 | drafted | chat | 140.0 | 142.8 | 141.5 | equal |
+| MiniCPM-V 4.7 | `--no-drafts` | code | 89.7 | 92.5 | 92.7 | equal |
+| MiniCPM-V 4.7 | `--no-drafts` | chat | 89.8 | 92.5 | 92.4 | equal |
+| Qwen3.6-35B-A3B | drafted | code | 209.5 | 212.1 | 212.4 | equal |
+| Qwen3.6-35B-A3B | drafted | chat | 153.0 | 155.2 | 161.9 | equal |
+| Qwen3.6-35B-A3B | `--no-drafts` | code | 90.0 | 92.9 | 92.1 | equal |
+| Qwen3.6-35B-A3B | `--no-drafts` | chat | 89.9 | 92.9 | 92.5 | equal |
+
+The nvcc 13.0 build decodes 1.2 to 3.2% under the nvcc 13.3 build with the compat `libcuda`.
+
+Concurrent requests: `bench_concurrent` starts N requests of one prompt at once (greedy, 256 tokens), tok/s is the
+aggregate of the streams, and the bracket holds each stream's rate in the two rounds.
+
+| Model | Mode | Prompt | Streams | Native, nvcc 13.3 | Python 0.6.6 | Native / Python | Tokens | Alone / serial checks |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| MiniCPM-V 4.7 | drafted | code | 1 | 189.8 / 189.8 | 189.4 / 189.3 | 1.002 | equal | alone 6/6, serial 2/2 |
+| MiniCPM-V 4.7 | drafted | chat | 1 | 141.3 / 141.5 | 141.6 / 141.5 | 0.999 | equal | alone 6/6, serial 2/2 |
+| MiniCPM-V 4.7 | drafted | code | 4 | 407.6 / 403.7 [107.4/106.5] | 397.4 / 395.7 [102.6/102.5] | 1.023 | equal | alone 24/24, serial 2/2 |
+| MiniCPM-V 4.7 | drafted | chat | 4 | 303.2 / 301.5 [78.4/78.0] | 308.1 / 308.2 [79.2/79.2] | 0.981 | equal | alone 24/24, serial 2/2 |
+| MiniCPM-V 4.7 | `--no-drafts` | code | 1 | 92.6 / 92.7 | 91.8 / 92.6 | 1.005 | equal | alone 6/6 |
+| MiniCPM-V 4.7 | `--no-drafts` | chat | 1 | 92.5 / 92.5 | 92.7 / 92.4 | 0.999 | equal | alone 6/6 |
+| MiniCPM-V 4.7 | `--no-drafts` | code | 4 | 259.5 / 257.6 [66.2/66.2] | 216.7 / 215.5 [55.1/55.0] | 1.196 | equal | alone 24/24 |
+| MiniCPM-V 4.7 | `--no-drafts` | chat | 4 | 261.1 / 261.1 [66.8/66.8] | 219.0 / 219.3 [55.8/56.0] | 1.191 | equal | alone 24/24 |
+| Qwen3.6-35B-A3B | drafted | code | 1 | 212.4 / 213.3 | 212.3 / 212.7 | 1.002 | equal | alone 6/6, serial 2/2 |
+| Qwen3.6-35B-A3B | drafted | chat | 1 | 156.4 / 157.3 | 162.0 / 162.4 | 0.967 | equal | alone 6/6, serial 2/2 |
+| Qwen3.6-35B-A3B | drafted | code | 4 | 444.8 / 445.2 [117.7/117.8] | 421.6 / 419.8 [110.0/109.7] | 1.058 | equal | alone 24/24, serial 2/2 |
+| Qwen3.6-35B-A3B | drafted | chat | 4 | 352.5 / 355.0 [91.5/91.7] | 351.1 / 349.9 [90.5/90.2] | 1.009 | equal | alone 24/24, serial 2/2 |
+| Qwen3.6-35B-A3B | `--no-drafts` | code | 1 | 92.9 / 92.6 | 92.8 / 92.2 | 1.003 | equal | alone 6/6 |
+| Qwen3.6-35B-A3B | `--no-drafts` | chat | 1 | 92.8 / 92.6 | 93.3 / 92.6 | 0.997 | equal | alone 6/6 |
+| Qwen3.6-35B-A3B | `--no-drafts` | code | 4 | 258.7 / 258.7 [65.7/65.1] | 211.4 / 211.4 [53.9/53.9] | 1.224 | equal | alone 24/24 |
+| Qwen3.6-35B-A3B | `--no-drafts` | chat | 4 | 260.8 / 260.2 [66.7/66.5] | 218.0 / 216.4 [55.6/55.5] | 1.199 | equal | alone 24/24 |
+
+With four streams the native server serves serial decode 19 to 22% faster than the Python engine (the Python engine's
+rounds over several streams run eagerly) and drafted decode from 2% under to 6% over it, depending on how many drafts
+the prompt keeps.
+
+### Cold prefill
+
+Time to first token and prefill tok/s with the prompt cache off. Tokens equal means the 32 greedy reply tokens have
+the same hash on both engines.
+
+| Model | Prompt tokens | Native TTFT | Native tok/s | Native, nvcc 13.0 tok/s | Python 0.6.6 TTFT | Python 0.6.6 tok/s | Native / Python | Tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| MiniCPM-V 4.7 | 2,048 | 0.35 s | 5,882 | 5,793 | 0.38 s | 5,352 | 1.099 | equal |
+| MiniCPM-V 4.7 | 8,192 | 1.34 s | 6,105 | 6,038 | 1.22 s | 6,729 | 0.907 | equal |
+| MiniCPM-V 4.7 | 32,768 | 6.25 s | 5,246 | 5,177 | 5.84 s | 5,611 | 0.935 | equal |
+| MiniCPM-V 4.7 | 65,536 | 15.14 s | 4,329 | 4,248 | 13.55 s | 4,837 | 0.895 | equal |
+| MiniCPM-V 4.7 | 131,072 | 41.42 s | 3,165 | - | 37.62 s | 3,484 | 0.908 | equal |
+| MiniCPM-V 4.7 | 262,000 | 126.62 s | 2,069 | - | 119.64 s | 2,190 | 0.945 | equal |
+| Qwen3.6-35B-A3B | 2,048 | 0.35 s | 5,812 | 5,664 | 0.38 s | 5,382 | 1.080 | equal |
+| Qwen3.6-35B-A3B | 8,192 | 1.33 s | 6,161 | 6,066 | 1.34 s | 6,126 | 1.006 | equal |
+| Qwen3.6-35B-A3B | 32,768 | 6.27 s | 5,226 | 5,104 | 5.53 s | 5,929 | 0.881 | equal |
+| Qwen3.6-35B-A3B | 65,536 | 15.17 s | 4,321 | 4,221 | 13.53 s | 4,844 | 0.892 | equal |
+| Qwen3.6-35B-A3B | 131,072 | 41.14 s | 3,186 | - | 37.64 s | 3,483 | 0.915 | equal |
+| Qwen3.6-35B-A3B | 262,000 | 125.24 s | 2,092 | - | 119.08 s | 2,200 | 0.951 | equal |
+
+Native prefill is 8 to 10% faster than the Python engine's at 2,048 tokens and 5 to 12% slower from 8,192 up (the two
+are level at 8,192 on Qwen3.6, where one of the three Python processes took 1.71 s against 1.23 s and 1.34 s for the
+others). The nvcc 13.0 build is 1.1 to 2.5% under the nvcc 13.3 one. The native prefill is the bf16 path;
+`--prefill-fp8` is not built.
+
+### Memory
+
+Native startup reports what it reserves; the Python engine reports one estimate. The model figure includes the 0.54
+GiB draft head and grows with the window (buffers sized by it), the stream figure is one stream's caches at that
+window. The kept prompt state is 62 MiB plus 24 KiB a prompt token with drafts (20 KiB without).
+
+| Server | Window | Parallel | Weights | Per stream | Python estimate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native, drafted | 8,192 | 4 | 20.24 GiB | 0.23 GiB | - |
+| Native, serial | 8,192 | 4 | 19.70 GiB | 0.22 GiB | - |
+| Native, drafted | 66,560 | 1 | 20.70 GiB | 1.46 GiB | - |
+| Native, drafted | 262,144 | 1 | 22.21 GiB | 5.56 GiB | - |
+| Python 0.6.6, drafted | 262,144 | 1 | - | - | 42.60 GiB |
+| Python 0.6.6, drafted | 8,192 | 4 | - | - | 23.62 GiB |
+| Python 0.6.6, serial | 8,192 | 4 | - | - | 22.82 GiB |
+| Python 0.6.6, drafted | 66,560 | 1 | - | - | 31.85 GiB |
+
+| Server | Model | Decode run (window 8,192, 4 streams) | 2,048 | 8,192 | 32,768 | 65,536 (window 66,560) | 131,072 (window 132,096) | 262,000 (window 262,144) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Native, drafted | MiniCPM-V 4.7 | 20.86 | 20.98 | 21.13 | 21.74 | 22.55 | 24.68 | 28.94 |
+| Native, no drafts | MiniCPM-V 4.7 | 20.31 | - | - | - | - | - | - |
+| Python 0.6.6, drafted | MiniCPM-V 4.7 | 19.86 | 19.92 | 20.76 | 22.12 | 22.69 | 25.59 | 36.15 |
+| Python 0.6.6, no drafts | MiniCPM-V 4.7 | 18.83 | - | - | - | - | - | - |
+| Native, drafted | Qwen3.6-35B-A3B | 20.86 | 20.98 | 21.13 | 21.74 | 22.55 | 24.68 | 28.94 |
+| Native, no drafts | Qwen3.6-35B-A3B | 20.31 | - | - | - | - | - | - |
+| Python 0.6.6, drafted | Qwen3.6-35B-A3B | 19.87 | 19.90 | 20.76 | 22.07 | 22.76 | 25.66 | 36.31 |
+| Python 0.6.6, no drafts | Qwen3.6-35B-A3B | 18.83 | - | - | - | - | - | - |
+
+On this 128 GB machine, with the other server resident, one native process peaks at 28.9 GiB with the 262,144-token
+window full, against 36.2 GiB for the Python engine; up to 64k the two are within 0.2 GiB of each other (22.55 and
+22.69 at 64k). The peaks are the largest per-process figure `nvidia-smi` showed in samples a second apart, so a
+shorter spike could be missed. The peak resident set (`VmHWM`) of the native process is 18.0 GiB and of the Python
+engine's 2.0 GiB. A budget here does not describe a smaller machine.
+
+### Not run
+
+- Sampled decoding (the tools run `--temperatures 0` here), the thinking-on template and images (not served).
+- Another GPU, driver or OS: sm_121 on this one machine only, with the one Python container above.
+- vLLM and the NVFP4 export on the same commit: the vLLM figures above are another day's run, and its server stayed up
+  for another user, so no new figure from it is quoted.
+- Quality benchmarks: the MMLU row above is the earlier run, not repeated for this commit.
+- The raw reports (every request's token counts, hashes and timings, the server logs and the memory samples) are kept
+  with the machine's other test logs, not in this repository.
+
 ## Not done
 
 - TODO: the expert kernels run about 8% longer a launch than the Python engine's identical SASS (gate/up 58.7 against
 54.0 us at one row); the allocator, module loading, nvcc and `libcuda` are not the cause.
-- TODO: CUDA graphs on the native engine (single-stream decode with drafts is 3 to 7% under the Python engine's).
+- TODO: CUDA graphs on the native engine (single-stream decode with drafts is 3 to 7% under the Python engine's; the
+  Receipts show 4% on Qwen3.6's chat prompt and parity on the other rows).
+- TODO: the native prefill trails the Python engine's by 5 to 12% from 8,192 tokens up (Receipts).
 - TODO: images and `--vision` (upstream #598).
-- TODO: native GSM8K, IFEval and HumanEval, 32k and long-context code runs, memory at 262,144 tokens.
+- TODO: native GSM8K, IFEval and HumanEval, 32k and long-context code runs.
 - TODO: `--prefill-fp8`; the native prefill is bf16.
-- TODO: more than two streams measured on MiniCPM; Qwen3.6 serves up to 16.
+- TODO: more than four streams measured; Qwen3.6 serves up to 16.
