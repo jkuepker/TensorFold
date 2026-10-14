@@ -48,7 +48,7 @@ pub const Engine = struct {
         };
     }
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !*Engine {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !*Engine {
         const cfg = try c.Config.read(gpa, io, dir);
         const g = cfg.g;
         const e = try gpa.create(Engine);

@@ -42,14 +42,15 @@ pub const Gdn = struct { c: usize, kh: usize, vh: usize, dk: usize, keep: usize 
 pub const Attn = struct { heads: usize, kv_heads: usize, dim: usize, half: usize };
 
 pub const Tri = struct {
-    set: *const aot.Set,
+    set: ?*const aot.Set, // the captured set; null: only the built-in kernels run (QwenNeedsCapturedKernels where none applies)
     s: cuda.Stream,
     glue: ?*const glue.Native = null, // the built-in row glue where it is byte-equal (glue_native.exact), else the captured launch
     prep: ?*const prep.Native = null, // qwen_prep.cu's kernels where `prep.exact` says they are byte-equal (null: replay)
     tree: ?native.Native = null, // qwen_attention.cu's kernels where `tree_native.exact` says they are byte-equal
 
-    fn run(t: Tri, name: []const u8, grid: [3]u32, args: []const aot.Arg, consts: []const aot.Const) !void {
-        try t.set.run(t.s, name, grid, args, consts);
+    pub fn run(t: Tri, name: []const u8, grid: [3]u32, args: []const aot.Arg, consts: []const aot.Const) !void {
+        const set = t.set orelse return error.QwenNeedsCapturedKernels;
+        try set.run(t.s, name, grid, args, consts);
     }
 
     /// glue.embed: a 4-bit table row dequantized, one program a row and 64-group.

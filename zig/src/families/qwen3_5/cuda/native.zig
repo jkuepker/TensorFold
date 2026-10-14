@@ -82,7 +82,7 @@ const Owned = struct {
 };
 
 /// The engine for a Qwen3.6 checkpoint: the 27B's, loaded with the MoE weights, hooked with the MoE block.
-pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, context: usize) !*q.Engine {
+pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, context: usize) !*q.Engine {
     const e = try gpa.create(q.Engine);
     errdefer gpa.destroy(e);
     e.gpa = gpa;
@@ -107,7 +107,7 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir:
     errdefer e.k.deinit();
     e.tree = try q.engine.Engine.treeKernels(ctx);
     errdefer if (e.tree) |*n| n.deinit();
-    m.block = try moe.Block.load(ctx, e.s, g, q.engine.prompt_rows, &e.k.triton);
+    m.block = try moe.Block.load(ctx, e.s, g, q.engine.prompt_rows, if (e.k.triton) |*set| set else null);
     errdefer m.block.deinit();
     e.w = m.w.base;
     e.scratch = try q.state.Scratch.init(gpa, ctx.d, g, q.engine.prompt_rows, context);
@@ -124,8 +124,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// `open`, the MTP head read from `side` when given (a fine-tune of the same language model ships none).
 pub fn openWith(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options, side: ?[]const u8) !Loaded {
-    // the glue runs the Python engine's Triton kernels, captured on this chip (no own glue kernels yet)
-    const e = try engine(gpa, io, ctx, dir, kernels orelse return error.QwenNeedsCapturedKernels, o.context);
+    // a GB10 runs the built-in kernels alone; a captured set (optional there) is what any other chip needs
+    if (kernels == null and (try ctx.capability()) != q.glue_native.verified_capability) return error.QwenNeedsCapturedKernels;
+    const e = try engine(gpa, io, ctx, dir, kernels, o.context);
     errdefer e.deinit();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);

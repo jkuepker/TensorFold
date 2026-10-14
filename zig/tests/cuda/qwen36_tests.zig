@@ -221,13 +221,13 @@ pub fn run(gpu: check.Gpu, model: []const u8, kernels: []const u8, oracle: []con
     defer w.deinit();
     try stream.synchronize();
     const g = w.base.g;
-    var k = try qwen27.kernels.Kernels.load(gpa, gpu.io, gpu.ctx, kernels, g.linear_v_heads);
+    var k = try qwen27.kernels.Kernels.load(gpa, gpu.io, gpu.ctx, if (std.mem.eql(u8, kernels, "native")) null else kernels, g.linear_v_heads);
     defer k.deinit();
     const prompt_rows = 4096;
     const capacity = 8192;
     var scratch = try st.Scratch.init(gpa, gpu.d, g, prompt_rows, capacity);
     defer scratch.deinit();
-    var block = try qwen35.moe.Block.load(gpu.ctx, stream, g, prompt_rows, &k.triton);
+    var block = try qwen35.moe.Block.load(gpu.ctx, stream, g, prompt_rows, if (k.triton) |*set| set else null);
     defer block.deinit();
     var tree = qwen27.tree_native.Native.load(gpu.d, try gpu.ctx.capability()) catch |e| if (e == error.UnverifiedArchitecture) null else return e;
     defer if (tree) |*n| n.deinit();

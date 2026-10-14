@@ -56,7 +56,7 @@ pub const Item = struct { q: QLinear, out: u64 };
 pub const Kernels = struct {
     d: *const cuda.Driver,
     mods: [15]cuda.Module,
-    triton: cuda.aot.Set,
+    triton: ?cuda.aot.Set, // the captured Triton set; null: the built-in kernels alone
     glue: ?glue_native.Native, // the built-in row glue (null off GB10)
     prep: ?prep_native.Native, // qwen_prep.cu where the GPU is the one it was verified on
     group: cuda.Function,
@@ -84,8 +84,8 @@ pub const Kernels = struct {
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
-    /// Loads every module; `triton_dir` holds the captured aot.json and cubins for this GPU.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, triton_dir: []const u8, heads: usize) !Kernels {
+    /// Loads every module; `triton_dir` holds the captured aot.json and cubins for this GPU (null: none, see `native_only`).
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, triton_dir: ?[]const u8, heads: usize) !Kernels {
         const d = ctx.d;
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
@@ -119,8 +119,8 @@ pub const Kernels = struct {
         // gdn_prefill_cuda: a block takes 128 value rows, or 64 when there are fewer heads than SMs
         k.prompt_rows = if (heads >= sms) 128 else 64;
         k.prompt_chain = try k.mods[5].function(if (k.prompt_rows == 128) sym.chain128 else sym.chain64);
-        k.triton = try cuda.aot.Set.load(gpa, io, d, ctx.device, triton_dir);
-        errdefer k.triton.deinit();
+        k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
+        errdefer if (k.triton) |*t| t.deinit();
         k.glue = glue_native.Native.load(d, try ctx.capability()) catch |e| if (e == error.UnverifiedArchitecture) null else return e;
         errdefer if (k.glue) |*g| g.deinit();
         try k.group.allowDynamicShared(group_smem);
@@ -142,13 +142,13 @@ pub const Kernels = struct {
 
     /// The Triton glue launches on `s`: native prep kernels where they were verified, the captured cubins otherwise.
     pub fn tri(k: *Kernels, s: cuda.Stream) triton_glue.Tri {
-        return .{ .set = &k.triton, .s = s, .glue = if (k.glue) |*g| g else null, .prep = if (k.prep) |*n| n else null };
+        return .{ .set = if (k.triton) |*t| t else null, .s = s, .glue = if (k.glue) |*g| g else null, .prep = if (k.prep) |*n| n else null };
     }
 
     pub fn deinit(k: *Kernels) void {
         if (k.glue) |*g| g.deinit();
         if (k.prep) |*n| n.deinit();
-        k.triton.deinit();
+        if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
     }
 };

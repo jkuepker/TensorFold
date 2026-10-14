@@ -69,7 +69,7 @@ fn ids(gpa: std.mem.Allocator, v: std.json.Value) ![]u32 {
 
 pub fn run(gpu: check.Gpu, model: []const u8, kernels: []const u8, oracle: []const u8, only: []const u8) !void {
     const gpa = gpu.gpa;
-    const e = try native.engine(gpa, gpu.io, gpu.ctx, model, kernels, 8192);
+    const e = try native.engine(gpa, gpu.io, gpu.ctx, model, if (std.mem.eql(u8, kernels, "native")) null else kernels, 8192);
     defer e.deinit();
     const moe: *native.Moe = @ptrCast(@alignCast(e.hooks.?.ctx));
     var pk = try qwen35.pack.Kernels.load(gpu.d, e.s, (try gpu.ctx.attribute(.integrated)) == 0);

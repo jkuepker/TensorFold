@@ -73,7 +73,7 @@ const Rig = struct {
     }
 
     fn replay(r: *Rig) Tri {
-        return .{ .set = &r.k.triton, .s = r.s };
+        return .{ .set = &r.k.triton.?, .s = r.s };
     }
 
     fn fresh(r: *Rig, n: usize, heavy: bool, scale: f32) !cuda.DeviceBuffer {
@@ -277,7 +277,7 @@ fn variantArgs(comptime fname: []const u8, plan: tri.Tri.Plan, q: u64, kn: u64, 
 }
 
 fn variant(rig: *Rig, vi: usize) !void {
-    const v = rig.k.triton.variants[vi];
+    const v = rig.k.triton.?.variants[vi];
     const fname = v.spec.@"fn";
     const is_shared = std.mem.eql(u8, fname, "_shared");
     const is_tail = std.mem.eql(u8, fname, "_tail");
@@ -303,11 +303,11 @@ fn variant(rig: *Rig, vi: usize) !void {
     const offs = sg.r.offsets(3, 0);
     var arg_buf: [16]aot.Arg = undefined;
     const parts = rig.part[0].parts();
-    const found = if (is_shared) try rig.k.triton.find("_shared", variantArgs("_shared", plan, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, parts, rig.out[0].ptr, &arg_buf), &.{
+    const found = if (is_shared) try rig.k.triton.?.find("_shared", variantArgs("_shared", plan, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, parts, rig.out[0].ptr, &arg_buf), &.{
         aot.ci("H", H), aot.ci("HK", HK), aot.ci("D", D), aot.ci("G", H / HK), aot.ci("CH", tri.chunk), aot.cf("SCALE", 0.0625), aot.ci("GR", tri.group_chunks),
-    }) else if (is_tail) try rig.k.triton.find("_tail", variantArgs("_tail", plan, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, parts, rig.out[0].ptr, &arg_buf), &.{
+    }) else if (is_tail) try rig.k.triton.?.find("_tail", variantArgs("_tail", plan, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, parts, rig.out[0].ptr, &arg_buf), &.{
         aot.ci("H", H), aot.ci("HK", HK), aot.ci("D", D), aot.ci("G", H / HK), aot.ci("CH", tri.chunk), aot.ci("MAXD", tri.max_nodes), aot.cf("SCALE", 0.0625), aot.ci("GR", tri.group_chunks),
-    }) else try rig.k.triton.find("_merge", variantArgs("_merge", plan, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, parts, rig.out[0].ptr, &arg_buf), &.{
+    }) else try rig.k.triton.?.find("_merge", variantArgs("_merge", plan, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, parts, rig.out[0].ptr, &arg_buf), &.{
         aot.ci("H", H), aot.ci("D", D), aot.ci("G", H / HK), aot.ci("DS", 64), aot.ci("CH", tri.chunk), aot.ci("GR", tri.group_chunks),
     });
     try check.expect(std.mem.eql(u8, found.spec.hash, v.spec.hash), "variant {s} {s} resolves to {s}", .{ fname, v.spec.hash[0..6], found.spec.hash[0..6] });
@@ -401,7 +401,7 @@ pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
         .part = undefined,
         .nat = try native.Native.load(gpu.d, try gpu.ctx.capability()),
         .prng = std.Random.DefaultPrng.init(0x7ee_a77e),
-        .covered = try gpa.alloc(bool, k.triton.variants.len),
+        .covered = try gpa.alloc(bool, k.triton.?.variants.len),
     };
     @memset(rig.covered, false);
     for (seqs, &rig.home) |sq, *h| h.* = .{ sq.keys[3], sq.values[3] };
@@ -418,13 +418,13 @@ pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
     const before = rig.bad;
     lanes(&rig, rounds);
     std.debug.print("lanes: {d} cases so far, {d} differ\n", .{ rig.cases, rig.bad - before });
-    for (0..k.triton.variants.len) |vi| variant(&rig, vi) catch |e| {
+    for (0..k.triton.?.variants.len) |vi| variant(&rig, vi) catch |e| {
         std.debug.print("  variant {d} failed: {t}\n", .{ vi, e });
         rig.bad += 1;
     };
     for ([_]Spec{ .{ .p = 4096, .w = 1 }, .{ .p = 4096, .w = 16 }, .{ .p = 8191, .w = 1 }, .{ .p = 8191, .w = 16 }, .{ .p = 8191, .w = 64 } }) |sp| try timing(&rig, &.{sp});
     var missing: usize = 0;
-    for (k.triton.variants, rig.covered) |v, c| {
+    for (k.triton.?.variants, rig.covered) |v, c| {
         const f = v.spec.@"fn";
         if (!c and (std.mem.eql(u8, f, "_shared") or std.mem.eql(u8, f, "_tail") or std.mem.eql(u8, f, "_merge"))) missing += 1;
     }
