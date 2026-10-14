@@ -333,9 +333,11 @@ the same hash on both engines.
 | Qwen3.6-35B-A3B | 131,072 | 41.14 s | 3,186 | - | 37.64 s | 3,483 | 0.915 | equal |
 | Qwen3.6-35B-A3B | 262,000 | 125.24 s | 2,092 | - | 119.08 s | 2,200 | 0.951 | equal |
 
-Native prefill is 8 to 10% faster than the Python engine's at 2,048 tokens and 5 to 12% slower from 8,192 up (the two
-are level at 8,192 on Qwen3.6, where one of the three Python processes took 1.71 s against 1.23 s and 1.34 s for the
-others). The nvcc 13.0 build is 1.1 to 2.5% under the nvcc 13.3 one. The native prefill is the bf16 path;
+The native figure is the median of a first and two repeated requests in one process; the Python figure is the median
+of the first request of three fresh processes, since 0.6.6 resumes a repeated prompt even at `--prompt-cache-gib 0`.
+Compared first request to first request, native prefill is 4.4 to 4.6% faster at 2,048 tokens (0.367 and 0.364 s
+against 0.383 and 0.381 s), not the 8 to 10% the ratio column shows, and 5 to 12% slower from 8,192 up (the two are
+level at 8,192 on Qwen3.6, where one of the three Python processes took 1.71 s against 1.23 s and 1.34 s). The nvcc 13.0 build is 1.1 to 2.5% under the nvcc 13.3 one. The native prefill is the bf16 path;
 `--prefill-fp8` is not built.
 
 ### Memory
@@ -367,10 +369,11 @@ window. The kept prompt state is 62 MiB plus 24 KiB a prompt token with drafts (
 | Python 0.6.6, no drafts | Qwen3.6-35B-A3B | 18.83 | - | - | - | - | - | - |
 
 On this 128 GB machine, with the other server resident, one native process peaks at 28.9 GiB with the 262,144-token
-window full, against 36.2 GiB for the Python engine; up to 64k the two are within 0.2 GiB of each other (22.55 and
-22.69 at 64k). The peaks are the largest per-process figure `nvidia-smi` showed in samples a second apart, so a
-shorter spike could be missed. The peak resident set (`VmHWM`) of the native process is 18.0 GiB and of the Python
-engine's 2.0 GiB. A budget here does not describe a smaller machine.
+window full, against 36.2 GiB for the Python engine. Below that the native process holds about 1 GiB more at decode
+and 2k, 0.4 GiB more at 8k, 0.4 GiB less at 32k and 0.1 GiB less at 64k (22.55 against 22.69). The peaks are the
+largest per-process figure `nvidia-smi` showed in samples a second apart, so a shorter spike could be missed. The
+peak resident set (`VmHWM`) of the native process is 18.0 GiB, most of it load-time staging (0.35 GiB resident while
+serving), and of the Python engine 2.2 GiB. A budget here does not describe a smaller machine.
 
 ### Not run
 
