@@ -44,3 +44,10 @@ test "the embedded list holds the Python package's 79,591 ids" {
     defer a.free(ids);
     try std.testing.expectEqual(@as(usize, 79591), ids.len);
 }
+
+test "the embedded list is the Python package's draft_vocab.txt byte for byte" {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(@import("draft_vocab").text, &digest, .{});
+    const want = "88d5b483a849ae9245b78b69f41f11cdfc8b5c024f0786c1c8196263857cc93e";
+    try std.testing.expectEqualStrings(want, &std.fmt.bytesToHex(digest, .lower));
+}
