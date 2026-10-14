@@ -83,7 +83,7 @@ pub const Cuda = struct {
 
     /// The facts the round loop reads: 16-row windows in one forward; with DFlash2, host trees with node chances.
     pub fn facts(x: *const Cuda) lanes.Model {
-        var m: lanes.Model = .{ .exact_width = st.max_rows, .hidden_rows = true, .batch_rows = st.round_rows, .max_streams = @min(x.streams, st.max_streams), .streams_exact = true };
+        var m: lanes.Model = .{ .exact_width = st.max_rows, .hidden_rows = true, .batch_rows = st.round_rows, .max_streams = @min(x.streams, st.max_streams), .streams_exact = true, .open_together = true };
         if (x.drafter != null) {
             m.mtp = true;
             m.speculate = true;

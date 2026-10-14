@@ -1,14 +1,15 @@
-//! A lane host's admission round: every queued request the lanes have room for, the rest prefilled together.
+//! A lane host's admission round: every queued request the lanes have room for, opened together or one at a time.
 const std = @import("std");
 const lanes = @import("lanes");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const lone = @import("lane_host_lone.zig");
 const Job = LaneHost.Job;
 
-/// Every queued request the lanes have room for: a lone one to the backend's driver, the rest prefilled together.
+/// Every queued request the lanes have room for: a lone one to the backend's driver, the rest opened together or alone.
 pub fn all(h: *LaneHost) void {
     var batch: std.ArrayList(*Job) = .empty;
     defer batch.deinit(h.gpa);
+    const together = h.core.opensTogether();
     while (true) {
         const job = switch (h.prepare()) {
             .none => break,
@@ -33,7 +34,14 @@ pub fn all(h: *LaneHost) void {
             _ = h.drop(job, "out of memory");
             continue;
         };
+        if (!together) open(h, &batch);
     }
+    open(h, &batch);
+}
+
+/// The batch's streams prefilled and opened by the core, each job then delivered; the batch is left empty.
+fn open(h: *LaneHost, batch: *std.ArrayList(*Job)) void {
+    defer batch.clearRetainingCapacity();
     if (batch.items.len == 0) return;
     const streams = h.gpa.alloc(*lanes.Stream, batch.items.len) catch return dropAll(h, batch.items, "out of memory");
     defer h.gpa.free(streams);

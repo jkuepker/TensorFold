@@ -32,6 +32,7 @@ pub const Model = struct {
     draft_probabilities: bool = false, // the head gives each drafted node's chance of landing
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
     draft_stops: bool = false, // the head ends a chain by its own confidence: a round asks it for the most drafts
+    open_together: bool = false, // streams admitted together open together: every prompt pass, then the first tokens
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
     lane_costs: []const Cost = &.{}, // a lone stream's window ms by rows, up to its widest tree (timed at load)
     lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
@@ -56,6 +57,7 @@ pub const Config = struct {
     fill_floor: f64 = 0.35, // the share of grafted rows a stream must keep to go on reading its chain back every round
     draft_streams: bool,
     draft_stops: bool = false,
+    open_together: bool = false,
     head_trees: bool,
     head_lanes: u32 = 0, // a lone stream's lanes at most, the planner picking each round's (0: the depth rule's chain)
     head_depth: u32 = 16, // and their depth at most
@@ -117,6 +119,7 @@ pub const Config = struct {
             .node_probabilities = m.draft_probabilities,
             .draft_streams = m.draft_streams,
             .draft_stops = m.draft_stops,
+            .open_together = m.open_together,
             .head_trees = m.head_trees,
             .depth_prior = depth_prior,
             .family_costs = family_costs,

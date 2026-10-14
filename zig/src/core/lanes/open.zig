@@ -109,6 +109,11 @@ pub fn openedMany(e: *Engine, list: []const *Stream, errs: []?anyerror) !void {
     }
 }
 
+/// Whether streams admitted together may open together (`addMany`): the backend keeps each one's first row apart.
+pub fn opensTogether(e: *const Engine) bool {
+    return e.cfg.open_together;
+}
+
 /// Whether the backend can run a prompt pass a chunk at a time between rounds (`fillStream`).
 pub fn fills(e: *const Engine) bool {
     return e.backend.vtable.prefill_step != null;
