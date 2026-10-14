@@ -23,6 +23,9 @@ const qwen_prep_f64_tests = @import("qwen_prep_f64_tests.zig");
 const qwen_attention_tests = @import("qwen_attention_tests.zig");
 const qwen_attention_f64_tests = @import("qwen_attention_f64_tests.zig");
 const qwen_gdn_f64_tests = @import("qwen_gdn_f64_tests.zig");
+const qwen_router_f64_tests = @import("qwen_router_f64_tests.zig");
+const qwen_experts_f64_tests = @import("qwen_experts_f64_tests.zig");
+const qwen_proj_f64_tests = @import("qwen_proj_f64_tests.zig");
 const qwen36_tests = @import("qwen36_tests.zig");
 const qwen36_mtp_tests = @import("qwen36_mtp_tests.zig");
 const qmm_group_tests = @import("qmm_group_tests.zig");
@@ -85,6 +88,9 @@ const usage =
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  affine4-experts <dir>     grouped MLX 4-bit experts (SwiGLU, relu^2) against recorded fixture bytes (oracle/affine4_experts.py)
+    \\  qwen-router-f64 <aot|native> [dir] Qwen3.6 router logits, picks, weights, combine vs float64 (dir: qwen35/capture_router.py fixtures)
+    \\  qwen-experts-f64          Qwen3.6 experts (MLX 4-bit SwiGLU, 256 routed + shared, top-8) gate-up and down vs float64, decode and prompt
+    \\  qwen-proj-f64 <aot|native> Qwen3.6 4-bit projections (GDN, attention, o_proj, lm_head; dense, denseGroup, prefillDense) vs float64
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
@@ -189,6 +195,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         return qwen_glue_f64_tests.run(gpu, kernels, if (rest.len > 1) rest[1] else null);
     }
     if (std.mem.eql(u8, cmd, "qwen35-router")) return qwen35_router_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 240);
+    if (std.mem.eql(u8, cmd, "qwen-router-f64")) return qwen_router_f64_tests.run(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else null);
+    if (std.mem.eql(u8, cmd, "qwen-experts-f64")) return qwen_experts_f64_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-proj-f64")) return qwen_proj_f64_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "qwen-prep")) return qwen_prep_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "qwen-prep-f64")) return qwen_prep_f64_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "qwen-attention-f64")) return qwen_attention_f64_tests.run(gpu, if (rest.len > 0) rest[0] else null, if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 8);

@@ -188,3 +188,29 @@ rows as chains and random trees, 2 to 16 streams, normal and heavy-tail keys, Na
 `_shared`/`_tail`/`_merge` variant with its pointer alignments and `W`); every partial slot (0xff-filled first) and the bf16 output must be
 byte-equal. The engine takes the native kernels on sm_121 only (`tree_native.verified_capability`); `tree_native.exact` turns one kernel
 back to the replay. A kernel set without those three entries (`aot.json` stripped of them) runs the whole engine on the native ones.
+
+## FP64 references
+
+`qwen-router-f64`, `qwen-experts-f64` and `qwen-proj-f64` hold the MoE and projection kernels to CONTRIBUTING.md's precision rule, beside the
+byte-equality differentials above and without changing a kernel output. Each output is compared with a host float64 reference computed from
+the same input bytes (bf16 rows, bf16 router rows, MLX 4-bit words with bf16 scales and biases, all dequantized in float64), never from a
+native or Triton output. Every check prints the worst per-column absolute and relative error (`RESULT`), a summary per output (`TABLE`)
+and fails past its bound; relative error is against max(|reference|, the column's largest |reference| / 1024). `CONTROL` lines show the
+check refusing an output moved four bounds away (and, for the router, two picks swapped).
+
+- `tf-cuda-test qwen-router-f64 <kernel set|native> [fixtures]` (fixtures: `qwen35/capture_router.py`'s dump; the kernel set holds the
+  captured `_router`, `_topk_rows`, `_combine`): router logits (bound 2^-16 of sum |x w|, one fp32 rounding per k16 step), the picks
+  (a top-8 up to the logits' own errors against float64, equal to the strict float64 ranking or one transposition from it, adjacent
+  picks or the last pick against the best unpicked expert; each such near-tie row is printed with its margin), the weights
+  (softmax of the picks' float64 logits, the shared slot a sigmoid of the bf16-rounded gate logit) and the combine (fp32 and bf16 `y`),
+  on the real captured rows and a seeded sweep. With a kernel set the Triton launch gets the same check and native must be no worse.
+- `tf-cuda-test qwen-experts-f64`: the shared expert and 256 routed ones (MLX 4-bit, SwiGLU, hidden 2048, width 512, top-8), decode at
+  1, 4 and 16 rows and the prompt kernels at 96 rows and 128 rows on one hot set. Gate-up is compared after SwiGLU with a bound built from
+  the kernels' bf16 roundings of gate, up, silu and the product; down reads the kernel's own activations (fp32 rows in decode, bf16 in
+  the prompt). The prompt reference rounds the weights to bf16 once, as that kernel does (quant-ref's convention).
+- `tf-cuda-test qwen-proj-f64 <kernel set|native>`: GDN qkv, z, b, a; attention q, k, v; o_proj/out_proj; lm_head at the served shapes,
+  `dense`, `denseGroup` (fused 4 and 3 parts) at 1 to 80 rows and `prefillDense` at 1 to 130 rows, on identical input rows with their group
+  sums. Bound: 2^-8 |y| (the bf16 output) plus (k/16 + 16) 2^-23 of sum |x| (|q s| + |b|).
+
+The Python engine runs the experts and projections as CUDA kernels these are compiled from, so there is no separate captured reference
+for them: the printed bound is the format's.
