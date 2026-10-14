@@ -13,7 +13,6 @@ const plan_lanes = @import("plan_lanes.zig");
 const fill = @import("fill.zig");
 const trail = @import("trail.zig");
 const open = @import("open.zig");
-const admit = @import("admit.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
 const LogRow = @import("logprob.zig").Row;
@@ -85,10 +84,7 @@ pub const Engine = struct {
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
 
-    /// addStream for several streams, their prompt passes shared (admit.zig).
-    pub fn addStreams(e: *Engine, streams: []const *Stream, errs: []?anyerror) !void {
-        return admit.streams(e, streams, errs);
-    }
+    pub const addStreams = open.addMany;
 
     /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
     pub fn adopt(e: *Engine, s: *Stream) !void {
