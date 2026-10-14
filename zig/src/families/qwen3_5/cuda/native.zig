@@ -144,7 +144,8 @@ pub fn openWith(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, di
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .lanes = try q.Lanes.init(gpa, e, max_lanes), .target = undefined };
-    own.lanes.shared_prompts = false; // every prompt through prefill's chunks, the pass checked against the Python engine
+    // every prompt through prefill's chunks, the pass checked against the Python engine
+    own.lanes.shared_prompts = false;
     errdefer own.lanes.deinit();
     own.target = .{ .e = e, .seqs = &own.lanes.seqs, .held = &own.lanes.held };
     var loaded: Loaded = .{

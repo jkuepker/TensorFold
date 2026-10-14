@@ -28,7 +28,7 @@ pub const Model = struct {
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
-        const files = try shards.shardFiles(gpa, io, dir);
+        const files = try shards.shardFilesSkipping(gpa, io, dir, "vision");
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
         m.weights = try weights.load(&m.checkpoint, config.tied);

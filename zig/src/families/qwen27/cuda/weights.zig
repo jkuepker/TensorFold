@@ -132,7 +132,8 @@ pub const Loader = struct {
 
     /// `tile` of tensors already read: MLX words (n, k/8), scales and biases (n, k/64), `name` for messages.
     pub fn tileTensors(L: *Loader, parts: [3]Tensor, name: []const u8, n: usize, k: usize) !QLinear {
-        const words: @TypeOf(parts[0].dtype) = if (parts[0].dtype == .i32) .u32 else parts[0].dtype; // MLX words as stored, or viewed as int32
+        // MLX words as stored, or viewed as int32
+        const words: @TypeOf(parts[0].dtype) = if (parts[0].dtype == .i32) .u32 else parts[0].dtype;
         if (words != .u32 or parts[1].dtype != .bf16 or parts[2].dtype != .bf16) return error.UnsupportedQuantization;
         const k8 = k / 8;
         const kg = k / 64;

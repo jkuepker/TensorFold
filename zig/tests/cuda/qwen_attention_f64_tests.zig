@@ -15,13 +15,15 @@ const D = att.D;
 const HK = att.HK;
 const grid_p = [_]usize{ 0, 1, 511, 512, 513, 2047, 2048, 4096, 6144, 8191 };
 const grid_w = [_]usize{ 1, 4, 17, 64 };
-const wide_p = [_]usize{ 0, 511, 4096, 8191 }; // the widest window (128 rows) is dear for the float64 reference: a few lengths
+// the widest window (128 rows) is dear for the float64 reference: a few lengths
+const wide_p = [_]usize{ 0, 511, 4096, 8191 };
 const longest = 262143; // the longest context the model serves, less one: the last committed length
 const long_cap = longest + 256 + 1; // caches of the long cases: the window's rows and a spare position past the longest
 const long_streams = 2;
 // 131071 is the longest unfolded stream (256 slots); 262143 folds 127 groups into 131 (0.15 s a row and head to check)
 const Long = struct { p: usize, w: usize, kind: att.Kind = .chain, pool: usize = 0 };
-const long_cases = [_]Long{ // folding needs p / 2048 x w >= 64: 16383 / 16384 and 32768 / 65535 / 131071 / 131072 straddle it
+// folding needs p / 2048 x w >= 64: 16383 / 16384 and 32768 / 65535 / 131071 / 131072 straddle it
+const long_cases = [_]Long{
     .{ .p = 16383, .w = 8 },
     .{ .p = 16384, .w = 8 },
     .{ .p = 16384, .w = 8, .kind = .bushy },
@@ -44,7 +46,8 @@ const long_cases = [_]Long{ // folding needs p / 2048 x w >= 64: 16383 / 16384 a
 const Ctx = struct {
     rig: *att.Rig,
     gpa: std.mem.Allocator,
-    out: f64t.Phased, // the attention output, by head dim; decode (up to 16 rows in the call) and prompt-sized calls apart
+    // the attention output, by head dim; decode (up to 16 rows in the call) and prompt-sized calls apart
+    out: f64t.Phased,
     po: f64t.Phased, // each partial slot's o / l, by head dim
     lse: f64t.Phased, // each partial slot's m + ln l, by query head
     scores: []f64,

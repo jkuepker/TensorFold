@@ -108,7 +108,8 @@ const Ctx = struct {
     nodes: usize = 0,
     variants: [6]bool = @splat(false),
     unchanged_bad: usize = 0,
-    words_differ: usize = 0, // bf16 words of y that differ between the prompt chain and the decode chain on identical rows
+    // bf16 words of y that differ between the prompt chain and the decode chain on identical rows
+    words_differ: usize = 0,
     words_same_rows: usize = 0,
 
     fn state(c: *Ctx, zero: bool) ![]f32 {

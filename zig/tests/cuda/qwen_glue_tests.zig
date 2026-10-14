@@ -158,7 +158,8 @@ pub const Rig = struct {
                 .subnormal => if (rng.uintLessThan(u32, 4) == 0) bf(n) else @as(u16, @intCast(rng.uintLessThan(u32, 0x80))) | (if (rng.boolean()) @as(u16, 0x8000) else 0),
                 .tiny => bf(n * 1e-20),
                 .huge => bf(n * 1e19),
-                .spread => (@as(u16, @intCast(rng.uintLessThan(u32, 80) + 87)) << 7) | @as(u16, @intCast(rng.uintLessThan(u32, 128))) | (if (rng.boolean()) @as(u16, 0x8000) else 0), // exponents 2^-40 to 2^39, random mantissa: nearly every add rounds
+                // exponents 2^-40 to 2^39, random mantissa: nearly every add rounds
+                .spread => (@as(u16, @intCast(rng.uintLessThan(u32, 80) + 87)) << 7) | @as(u16, @intCast(rng.uintLessThan(u32, 128))) | (if (rng.boolean()) @as(u16, 0x8000) else 0),
                 .wide => bf(n * (if (rng.uintLessThan(u32, 8) == 0) @as(f32, 40.0) else @as(f32, 1.0))),
             };
         }
@@ -354,10 +355,12 @@ pub fn forest(r: *Rig, parents: []i32, shape: usize) void {
     for (parents, 0..) |*p, i| {
         p.* = switch (shape) {
             0 => if (i == 0) -1 else @as(i32, @intCast(i - 1)), // one chain
-            1 => if (i == 0 or rng.uintLessThan(u32, 8) == 0) -1 else @as(i32, @intCast(rng.uintLessThan(usize, i))), // bushy, a few roots
+            // bushy, a few roots
+            1 => if (i == 0 or rng.uintLessThan(u32, 8) == 0) -1 else @as(i32, @intCast(rng.uintLessThan(usize, i))),
             2 => -1, // all roots
             3 => if (i == 0) -1 else @as(i32, @intCast((i - 1) / 2)), // binary heap
-            else => if (i < 4 or rng.uintLessThan(u32, 3) == 0) (if (i == 0) -1 else @as(i32, @intCast(i - 1))) else @as(i32, @intCast(i - 1 - rng.uintLessThan(usize, @min(i, 3)))), // long chains with stray branches
+            // long chains with stray branches
+            else => if (i < 4 or rng.uintLessThan(u32, 3) == 0) (if (i == 0) -1 else @as(i32, @intCast(i - 1))) else @as(i32, @intCast(i - 1 - rng.uintLessThan(usize, @min(i, 3)))),
         };
     }
 }

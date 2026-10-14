@@ -46,7 +46,8 @@ pub const Native = struct {
     }
 
     fn go(f: cuda.Function, s: cuda.Stream, grid: [2]u32, a: *cuda.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = 64 }, .pdl = true }, s, a); // both kernels wait on the grid before them
+        // both kernels wait on the grid before them
+        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = 64 }, .pdl = true }, s, a);
     }
 
     /// glue.gdn_pre: conv over each row's window [state; qkv], q/k norms, g, beta; `sid`: per-row stream (MULTI).

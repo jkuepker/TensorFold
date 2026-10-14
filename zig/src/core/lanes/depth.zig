@@ -330,7 +330,8 @@ test "a head that ends its own chains is asked for the most drafts the room allo
     const gpa = std.testing.allocator;
     var fc: Table = .{};
     defer fc.deinit(gpa);
-    for (1..5) |w| try fc.put(gpa, @intCast(w), 5.0 + 4.0 * @as(f64, @floatFromInt(w))); // costly rows: the cost rule would draft 1
+    // costly rows: the cost rule would draft 1
+    for (1..5) |w| try fc.put(gpa, @intCast(w), 5.0 + 4.0 * @as(f64, @floatFromInt(w)));
     const shared: Table = .{};
     var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.3, 0.3, 0.3 }, .most_drafts = 3, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 2.0, .plain_guard = true, .node_probabilities = false, .batch_rows = 8, .chain_stops = true };
     defer rule.deinit();

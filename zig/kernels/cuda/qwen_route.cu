@@ -30,7 +30,8 @@ __device__ __forceinline__ float expf_tl(float x) { return ex2(__fmul_rn(x, LOG2
 
 }  // namespace
 
-constexpr int KC = 256, STAGES = 3, PAD = 8, LD = KC + PAD;  // K columns a stage, stages in flight, row padding against bank conflicts
+// K columns a stage, stages in flight, row padding against bank conflicts
+constexpr int KC = 256, STAGES = 3, PAD = 8, LD = KC + PAD;
 constexpr int ROWS_PER_TILE = 16, EXPERTS_PER_TILE = 32;
 constexpr int STAGE_ELEMS = (ROWS_PER_TILE + EXPERTS_PER_TILE) * LD;
 

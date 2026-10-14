@@ -47,7 +47,8 @@ pub const Cuda = struct {
     costs: [calibration.len + 1]lanes.config.Cost = undefined, // the forward's ms by a round's rows (calibrate)
     cost_count: usize = 0,
     held: features.Held = .{}, // a head's inputs: the prompts' normed rows until each stream's first verify
-    shared_prompts: bool = true, // false: every prompt runs alone through prefill, the pass the Qwen3.6 MoE is checked on
+    // false: every prompt runs alone through prefill, the pass the Qwen3.6 MoE is checked on
+    shared_prompts: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: u32) !Cuda {
         return .{

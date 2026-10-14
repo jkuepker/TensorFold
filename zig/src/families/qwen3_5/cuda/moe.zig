@@ -54,7 +54,8 @@ pub const Block = struct {
             (if (wide) pairs else 1) * 4,
             (if (wide) (pairs + 1023) / 1024 * b.count else 1) * 4,
             pairs * b.width * 2,
-            @max(pairs * g.hidden * 2, @min(rows, 16) * (moe.top_k + 1) * g.hidden * 4), // prompt rows bf16, decode rows fp32
+            // prompt rows bf16, decode rows fp32
+            @max(pairs * g.hidden * 2, @min(rows, 16) * (moe.top_k + 1) * g.hidden * 4),
         };
         var bought: usize = 0;
         errdefer for (b.bufs[0..bought]) |*x| x.free();

@@ -367,8 +367,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     if (@hasDecl(F, "snap_bytes") and cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // a row's bits ignore the cuts and a kept row costs no call: states keep at any row
-        const spare = if (@hasDecl(F, "snap_ready")) try F.snap_ready(loaded.target, cache) else 0; // spare storage it sets aside comes out of the budget
+        // a row's bits ignore the cuts, a kept row costs no call: states keep at any row; spare storage is budgeted
+        const spare = if (@hasDecl(F, "snap_ready")) try F.snap_ready(loaded.target, cache) else 0;
         store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = snapshots(F) }, .{ .lookahead = F.snap_rules.lookahead, .min_prompt = F.snap_rules.min_prompt, .warm = if (@hasDecl(F, "snap_warm")) .waits else .off }, cache - spare);
         h.store = store;
     }

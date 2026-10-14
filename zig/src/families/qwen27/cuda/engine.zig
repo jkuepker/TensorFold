@@ -33,7 +33,8 @@ pub const Engine = struct {
     ctx: *const cuda.Context,
     s: cuda.Stream,
     k: kern.Kernels,
-    tree: ?tree_native.Native, // qwen_attention.cu where the GPU is the one it was shown byte-equal on, else the captured launches
+    // qwen_attention.cu where the GPU is the one it was shown byte-equal on, else the captured launches
+    tree: ?tree_native.Native,
     w: wts.Weights,
     scratch: st.Scratch,
     context: usize,

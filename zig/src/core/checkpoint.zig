@@ -9,6 +9,11 @@ pub const DType = st.DType;
 
 /// The checkpoint's shard paths in name order: model.safetensors.index.json's weight map, else every model*.safetensors.
 pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
+    return shardFilesSkipping(gpa, io, dir, null);
+}
+
+/// shardFiles minus the index's shards whose file name starts with `omit` (a family's side tower).
+pub fn shardFilesSkipping(gpa: std.mem.Allocator, io: Io, dir: []const u8, omit: ?[]const u8) ![][:0]u8 {
     var names: std.ArrayList([:0]u8) = .empty;
     errdefer {
         for (names.items) |n| gpa.free(n);
@@ -25,7 +30,7 @@ pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
         var it = parsed.value.object.get("weight_map").?.object.iterator();
         while (it.next()) |e| {
             const file = e.value_ptr.string;
-            if (std.mem.startsWith(u8, std.fs.path.basename(file), "vision")) continue; // MiniCPM's image tower
+            if (omit) |p| if (std.mem.startsWith(u8, std.fs.path.basename(file), p)) continue;
             if ((try seen.getOrPut(gpa, file)).found_existing) continue;
             try names.ensureUnusedCapacity(gpa, 1);
             names.appendAssumeCapacity(try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, file }, 0));
@@ -66,7 +71,17 @@ pub const Checkpoint = struct {
         return openModelPrefix(gpa, io, dir, null);
     }
     pub fn openModelPrefix(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefix: ?[]const u8) !Checkpoint {
-        const paths = try shardFiles(gpa, io, dir);
+        return openModelSkipping(gpa, io, dir, prefix, null);
+    }
+    /// openModelPrefix without the shards whose file name starts with `omit`.
+    pub fn openModelSkipping(
+        gpa: std.mem.Allocator,
+        io: Io,
+        dir: []const u8,
+        prefix: ?[]const u8,
+        omit: ?[]const u8,
+    ) !Checkpoint {
+        const paths = try shardFilesSkipping(gpa, io, dir, omit);
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
         errdefer ck.close();

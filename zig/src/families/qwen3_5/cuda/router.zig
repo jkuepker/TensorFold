@@ -102,7 +102,8 @@ pub const Native = struct {
     }
 
     fn go(n: Native, f: cuda.Function, grid: [2]u32, block: u32, shared: u32, a: *cuda.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = block }, .shared = shared, .pdl = true }, n.s, a); // every qwen_route.cu kernel waits on the grid before it
+        // every qwen_route.cu kernel waits on the grid before it
+        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = 1 }, .block = .{ .x = block }, .shared = shared, .pdl = true }, n.s, a);
     }
 
     pub fn logits(n: Native, x: u64, w: u64, out: u64, m: usize, sh: Shape) !void {

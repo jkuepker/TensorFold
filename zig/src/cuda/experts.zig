@@ -28,7 +28,8 @@ pub const Layer = struct {
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up
-    swiglu: bool = false, // affine4: up stacks gate then up as [E][NI/32][D/64][2][288] under SwiGLU, not one relu^2 projection
+    // affine4: up stacks gate then up as [E][NI/32][D/64][2][288] under SwiGLU, not one relu^2 projection
+    swiglu: bool = false,
 };
 
 /// A call's epilogue: up with its layer's activation (SwiGLU, or relu^2), down to fp32 or to bf16 sums.
@@ -97,7 +98,8 @@ pub const Affine4Experts = struct {
     /// A call's kernel: the up with relu^2 over one projection, the up with SwiGLU over gate and up, the down.
     pub const Op = enum { up_relu2, up_swiglu, down };
 
-    pub const prompt_smem = [3]u32{ 38400, 34816, 38400 }; // Pre<64, M, ..>: M 1 three stages of 800 uint4, M 2 two of 1088
+    // Pre<64, M, ..>: M 1 three stages of 800 uint4, M 2 two of 1088
+    pub const prompt_smem = [3]u32{ 38400, 34816, 38400 };
 
     pub fn op(l: Layer, epi: Epi) Op {
         return if (epi != .up) .down else if (l.swiglu) .up_swiglu else .up_relu2;

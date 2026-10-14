@@ -111,7 +111,8 @@ const FakeDrafter = struct {
                 if ((at *% 2654435761 + j) % 5 == 0) t = (t + 1) % fake.vocab;
                 try l.held.append(gpa, t);
                 try guess.append(gpa, t);
-                if (x.ends and j + 1 < it.depth and (at *% 7 + 1) % 4 == 0) { // a draft it was not sure of ends the chain
+                // a draft it was not sure of ends the chain
+                if (x.ends and j + 1 < it.depth and (at *% 7 + 1) % 4 == 0) {
                     x.short += 1;
                     break;
                 }

@@ -133,7 +133,8 @@ extern "C" __global__ void __launch_bounds__(64)
     const uint16_t* src = is_q ? QG + (row * H + head) * 2 * D : KV + (row * HKV + head - H) * D;
     const uint16_t* wt = is_q ? QN : KN;
     const int d0 = 4 * threadIdx.x;
-    const int p0 = d0 < HALF ? d0 + HALF : (d0 < 2 * HALF ? d0 - HALF : d0);  // rotate-half partner of d0 (blocks of 4 stay whole)
+    // rotate-half partner of d0 (blocks of 4 stay whole)
+    const int p0 = d0 < HALF ? d0 + HALF : (d0 < 2 * HALF ? d0 - HALF : d0);
     float x[4], xp[4], w[4], wp[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i) {

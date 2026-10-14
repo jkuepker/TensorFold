@@ -309,7 +309,8 @@ pub const LaneHost = struct {
         };
         h.unlock();
         const r = job.request;
-        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) { // other work came first: it never ran
+        // other work came first: it never ran
+        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) {
             _ = h.cancel(job);
             return .dropped;
         }

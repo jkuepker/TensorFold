@@ -27,7 +27,8 @@ pub const lane_widths = [_]usize{ 1, 2, 3, 4, 8, 16 };
 pub const zero_tokens: [128]u32 = @splat(0);
 
 pub const Kind = enum { chain, bushy };
-pub const Spec = struct { p: usize, w: usize, kind: Kind = .chain, k: u8 = 0, v: u8 = 0 }; // k, v: the caches start 8 elements times these past the stream's first rows
+// k, v: the caches start 8 elements times these past the stream's first rows
+pub const Spec = struct { p: usize, w: usize, kind: Kind = .chain, k: u8 = 0, v: u8 = 0 };
 
 pub fn bf16(v: f32) u16 {
     const u: u32 = @bitCast(v);
@@ -50,7 +51,8 @@ pub const Rig = struct {
     k: *kern.Kernels,
     scratch: *st.Scratch,
     seqs: []st.Seq,
-    home: [st.max_streams][2]u64, // each stream's attention-layer key and value caches as the arena gave them (the first `seqs.len`)
+    // each stream's attention-layer key and value caches as the arena gave them (the first `seqs.len`)
+    home: [st.max_streams][2]u64,
     cap: usize, // positions each stream's caches hold
     pool: [2][2]cuda.DeviceBuffer, // pristine keys and values: normal, heavy tail
     q: cuda.DeviceBuffer,
@@ -111,7 +113,8 @@ pub const Rig = struct {
             const slack = i * 4096 * 2;
             for ([_]struct { dst: u64, src: cuda.DeviceBuffer }{ .{ .dst = seq.keys[3], .src = r.pool[pool][0] }, .{ .dst = seq.values[3], .src = r.pool[pool][1] } }) |c| {
                 try o.copy(c.dst, c.src.ptr + slack, sp.p * kv_row * 2);
-                try o.fill32(c.dst + sp.p * kv_row * 2, nan_words, (r.cap - 128 - sp.p) * kv_row / 2); // the 128 spare positions hold the shift
+                // the 128 spare positions hold the shift
+                try o.fill32(c.dst + sp.p * kv_row * 2, nan_words, (r.cap - 128 - sp.p) * kv_row / 2);
             }
         }
     }
@@ -233,7 +236,8 @@ fn grid(rig: *Rig) void {
     for (committed) |p| for (widths) |w| {
         if (p + w > capacity) continue;
         const shift: u8 = @intCast(n % 5);
-        run1(rig, &.{.{ .p = p, .w = w, .k = shift, .v = (shift * 3) % 5 }}, n % 4 / 3); // every fourth on the heavy-tail pool
+        // every fourth on the heavy-tail pool
+        run1(rig, &.{.{ .p = p, .w = w, .k = shift, .v = (shift * 3) % 5 }}, n % 4 / 3);
         run1(rig, &.{.{ .p = p, .w = w, .kind = .bushy, .k = (shift + 2) % 5, .v = shift }}, 0);
         n += 1;
     };

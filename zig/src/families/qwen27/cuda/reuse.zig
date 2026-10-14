@@ -141,5 +141,6 @@ test "a kept state is its DeltaNet layers' fixed part, the attention rows and a 
     const per = 10 * 2 * g.kvInner() * 2;
     try std.testing.expectEqual(std.mem.alignForward(usize, fixed + 4096 * per, page), bytes(g, 4096, false));
     try std.testing.expect(bytes(g, 8192, false) > bytes(g, 4096, false));
-    try std.testing.expectEqual(std.mem.alignForward(usize, fixed + 4096 * (per + g.hidden * 2), page), bytes(g, 4096, true)); // a drafting stream's rows ride along
+    // a drafting stream's rows ride along
+    try std.testing.expectEqual(std.mem.alignForward(usize, fixed + 4096 * (per + g.hidden * 2), page), bytes(g, 4096, true));
 }

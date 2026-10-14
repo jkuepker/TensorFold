@@ -21,7 +21,8 @@ const HKV = base.attn_shape.kv_heads;
 const D = base.attn_shape.dim;
 const HALF = base.attn_shape.half;
 const rows_list = [_]usize{ 1, 5, 64, 513, 2048 };
-const decode_rows = f64t.decode_rows; // a prompt-sized call is also run on its first rows of this many, the decode bucket
+// a prompt-sized call is also run on its first rows of this many, the decode bucket
+const decode_rows = f64t.decode_rows;
 const serve_pos_max: u64 = 262143; // the longest context the model serves; rows past it are the stress class
 const eps24 = 0x1p-24;
 
@@ -94,7 +95,8 @@ const GdnRow = struct {
     gb: [VH]f64,
     beta: [VH]f64,
     bb: [VH]f64,
-    qf: [KH]f64, // relative error is over max(|want|, 2^-7 of the head vector's largest |want|): one bf16 ulp of the vector
+    // relative error is over max(|want|, 2^-7 of the head vector's largest |want|): one bf16 ulp of the vector
+    qf: [KH]f64,
     kf: [KH]f64,
     vf: [VH]f64,
     c: [C]f64,
@@ -278,7 +280,8 @@ fn attnHead(t: *const base.Attn, row: usize, head: usize, o: *AttnRow) void {
         const cs = @cos(ang);
         const sn = @sin(ang);
         o.want[i] = if (i < HALF) o.xn[i] * cs - o.xn[p] * sn else o.xn[i] * cs + o.xn[p] * sn;
-        const m = @sqrt(o.xn[i] * o.xn[i] + o.xn[p] * o.xn[p]); // the pair's magnitude: the scale a cancelling rotation keeps
+        // the pair's magnitude: the scale a cancelling rotation keeps
+        const m = @sqrt(o.xn[i] * o.xn[i] + o.xn[p] * o.xn[p]);
         // two bf16 ulps of it (norm output, store), cosf and sinf at 2^-21, the fp32 angle (int to float, product)
         o.bound[i] = 2 * f64t.ulpBf16(m) + m * (0x1p-21 + 0x1p-23 * @abs(ang));
     }

@@ -174,7 +174,7 @@ pub fn loadFrom(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir:
     h.moe = try experts.upload(&L, k, routed, g, moe);
     h.norm = try bf16Vector(&L, m.final_norm, g.hidden);
     try L.settle();
-    var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, w27.prefix);
+    var ck = try core.Checkpoint.openModelSkipping(gpa, io, dir, w27.prefix, "vision");
     defer ck.close();
     h.draft = try draftHead(gpa, &L, &ck, h.ids, g);
     try L.settle();

@@ -95,7 +95,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, k: *const pack.Kernels, dir: []c
     defer src.deinit();
     var L = try w27.open(gpa, k.pack, &w.base, &src);
     defer L.close();
-    var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, w27.prefix);
+    var ck = try core.Checkpoint.openModelSkipping(gpa, io, dir, w27.prefix, "vision");
     defer ck.close();
     try src.add(&ck);
     w.layers = try gpa.alloc(Layer, g.layers);

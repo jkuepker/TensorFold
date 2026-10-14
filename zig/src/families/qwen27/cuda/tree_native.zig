@@ -50,7 +50,8 @@ pub const Native = struct {
     }
 
     fn go(f: cuda.Function, s: cuda.Stream, grid: [3]u32, smem: u32, a: *cuda.Args) !void {
-        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = grid[2] }, .block = .{ .x = 128 }, .shared = smem, .pdl = true }, s, a); // every kernel waits on the grid before it
+        // every kernel waits on the grid before it
+        try cuda.launch.launch(f, .{ .grid = .{ .x = grid[0], .y = grid[1], .z = grid[2] }, .block = .{ .x = 128 }, .shared = smem, .pdl = true }, s, a);
     }
 
     /// attention._shared: the committed chunks and folded groups of every item, in 16-row query tiles.
