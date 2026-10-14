@@ -6,6 +6,7 @@ const q = @import("qwen27");
 const pack = @import("pack.zig");
 const weights = @import("weights.zig");
 const moe = @import("moe.zig");
+const rt = @import("router.zig");
 const lanes = @import("lanes");
 const mtp = @import("mtp.zig");
 const mtp_weights = @import("mtp_weights.zig");
@@ -81,6 +82,17 @@ const Owned = struct {
     drafting: bool = false,
 };
 
+/// Whether every launch of this geometry has a built-in kernel (the dispatch's own shape guards); without a captured set nothing else can run it.
+fn builtinCovers(g: q.config.Geometry) bool {
+    const moe_ = g.moe orelse return false;
+    const attn: q.triton.Attn = .{ .heads = g.query_heads, .kv_heads = g.kv_heads, .dim = q.config.head_dim, .half = q.config.rotary_dim / 2 };
+    return g.hidden == q.glue_native.hidden and g.linear_v_heads == q.glue_native.value_heads and g.query_heads == q.glue_native.query_heads and
+        q.config.linear_dim == q.glue_native.value_dim and q.config.head_dim == q.glue_native.head_dim and
+        q.prep_native.gdnFits(g.linear_k_heads, g.linear_v_heads, q.config.linear_dim, g.convDim(), q.config.conv_taps - 1) and
+        q.prep_native.attnFits(attn.heads, attn.kv_heads, attn.dim, attn.half) and q.tree_native.fits(attn) and
+        g.hidden % rt.stage_columns == 0 and moe_.experts <= 256 and moe_.top_k <= 8;
+}
+
 /// The engine for a Qwen3.6 checkpoint: the 27B's, loaded with the MoE weights, hooked with the MoE block.
 pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, context: usize) !*q.Engine {
     const e = try gpa.create(q.Engine);
@@ -103,6 +115,7 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir:
     }
     errdefer m.w.deinit();
     const g = m.w.base.g;
+    if (kernels == null and !builtinCovers(g)) return error.QwenNeedsCapturedKernels;
     e.k = try q.kernels.Kernels.load(gpa, io, ctx, kernels, g.linear_v_heads);
     errdefer e.k.deinit();
     e.tree = try q.engine.Engine.treeKernels(ctx);
@@ -199,4 +212,17 @@ test "more lanes than a round holds are refused in words, drafts and fewer are n
     try std.testing.expect(refusal(false, 8, true) == null);
     try std.testing.expect(refusal(false, 8, false) == null);
     try std.testing.expect(refusal(false, 1, true) == null);
+}
+
+test "the built-in kernels cover Qwen3.6's geometry and refuse another" {
+    var g: q.config.Geometry = .{ .hidden = 2048, .intermediate = 0, .layers = 40, .linear_k_heads = 16, .linear_v_heads = 32, .query_heads = 16, .kv_heads = 2, .moe = .{ .experts = 256, .top_k = 8, .width = 512, .shared_width = 512 } };
+    try std.testing.expect(builtinCovers(g));
+    g.hidden = 4096;
+    try std.testing.expect(!builtinCovers(g));
+    g.hidden = 2048;
+    g.kv_heads = 4;
+    try std.testing.expect(!builtinCovers(g));
+    g.kv_heads = 2;
+    g.moe = null;
+    try std.testing.expect(!builtinCovers(g));
 }

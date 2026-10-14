@@ -70,7 +70,7 @@ pub const Replay = struct {
 };
 
 /// K columns the native router stages a step, and the dynamic shared bytes its stages take (qwen_route.cu's KC, STAGES, PAD).
-const stage_columns = 256;
+pub const stage_columns = 256;
 const router_shared: u32 = 3 * (16 + 32) * (stage_columns + 8) * 2;
 
 /// qwen_route.cu's kernels.

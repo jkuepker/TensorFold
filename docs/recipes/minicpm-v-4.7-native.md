@@ -55,9 +55,11 @@ kernels (`qwen_glue.cu`, `qwen_prep.cu`, `qwen_attention.cu`, `qwen_route.cu`), 
 `QwenNeedsCapturedKernels`, because the built-in kernels were verified on sm_121 only.
 
 A captured set is still accepted: `TENSORFOLD_CUDA_KERNELS=<folder>` (or a bundled `share/tensorfold/cuda/sm121`) names one,
-and on a GB10 the built-in kernels still take every launch they cover, so the set only serves a shape outside the
-tested constants (hidden 2048, 32 value heads of 128, 16 query heads of 256, 16 query and 2 key-value heads of 256 for
-attention, 8192 conv channels). The set is produced as `zig/tests/cuda/qwen36/README.md` describes.
+and on a GB10 the built-in kernels still take every launch they cover. The built-in kernels cover Qwen3.6-35B-A3B's
+geometry (hidden 2048, 16 key and 32 value heads of 128, 16 query and 2 key-value heads of 256, 256 routed experts
+with 8 picks, 8192 conv channels). A checkpoint of another geometry is refused at load with `QwenNeedsCapturedKernels` when
+there is no set, and with a set its uncovered launches replay from it. The set is produced as
+`zig/tests/cuda/qwen36/README.md` describes.
 
 ## Serve
 
@@ -101,7 +103,7 @@ prompt) with their prompt ids, greedy reply ids and parsed tool calls, plus the 
 | drafted, `--parallel 2`, two clients running the fixture at once | 7 of 7 equal, both | 6 of 6 equal, both | 2 of 2 equal, both |
 
 These rows were rerun on the built-in kernels with no captured set (`TENSORFOLD_CUDA_KERNELS` unset): the first three
-rows pass `serve_check.py` unchanged (the fourth was not rerun). The drafted `--parallel 1` run accepted 41 of 68, 78 of 140, 22 of 50, 15 of 16, 123 of 297 and 16 of 18 drafted tokens
+rows pass `serve_check.py` unchanged (the fourth was not rerun). The drafted `--parallel 1` run of the earlier captured-set build accepted 41 of 68, 78 of 140, 22 of 50, 15 of 16, 123 of 297 and 16 of 18 drafted tokens
 on the six replies. Qwen3.6's own `tf-cuda-test qwen36-layers` stays byte-equal to the Python engine's dumps (all 40
 layers, four prompts) with the vocabulary taken from the config. The tool-call smoke test (a tool call, the same call
 streamed, newlines in a plain answer) passes 3 of 3 on the drafted server.
@@ -131,8 +133,9 @@ The sweeps behind each native row, 0.1k / 1k / 4k / 16k / 2 streams: MiniCPM dra
 `20261013-201146-adhoc-ab-new-native-minicpmv47-nodrafts` (92.0, 90.3, 88.1, 77.4, 116.3) and
 `20261013-201218-adhoc-ab-new-native-minicpmv47-nodrafts-r2` (91.7, 89.9, 87.8, 77.0, 118.7); Qwen3.6 drafts
 `20261013-201320-adhoc-ab-new-native-qwen36-drafted` (157.5, 157.9, 163.1, 146.2, 177.1) and
-`20261013-201346-adhoc-ab-new-native-qwen36-drafted-r2` (157.8, 239.6, 156.9, 148.2, 161.5); the 239.6 is one rep at 1k
-that ran far above the others (reps of this drafted row differ by up to 2x). The Python rows are
+`20261013-201346-adhoc-ab-new-native-qwen36-drafted-r2` (157.8, 239.6, 156.9, 148.2, 161.5). The Qwen3.6 1k figure is not stable: the first sweep's three reps ran from 147.5 to 250.4
+tok/s and the second's from 158.0 to 241.2 (two of them near 240), so the 198.7 in the table is a mean of two medians that
+sit far apart; the reps of a drafted row differ by up to 2x. The Python rows are
 `20261013-005703-adhoc-tf-minicpmv47-mlx4-qwenmtp` and `20261013-012144-adhoc-tf-minicpmv47-mlx4-serial`, and vLLM's are
 from the Python recipe's table (another day's run).
 
@@ -147,7 +150,7 @@ beyond it. Against the table this page held before (captured set, nvcc 13.3: dra
 `--no-drafts` 89.6, 87.3, 86.0, 78.3, 114.5) no column is lower by more than 2.1% (4k drafts) or 1.4% (16k `--no-drafts`).
 
 Native drafted decode is at 94 to 100% of the Python engine's drafted decode in the four single-stream columns (and above
-it at two streams), native serial decode is at 97 to 100% of Python's serial decode, and native drafted decode is 1.5 to
+it at two streams), native serial decode is at 97 to 101% of Python's serial decode, and native drafted decode is 1.6 to
 1.7 times its own serial decode. The native engine launches each op separately and the Python engine replays CUDA graphs;
 the fused projections, the 0.3 confidence rule for ending a draft chain (the same as Python 0.6.6's) and the dependent
 launches closed most of that gap, and what is left is about the spread between sweeps. Against vLLM's NVFP4 server, which
