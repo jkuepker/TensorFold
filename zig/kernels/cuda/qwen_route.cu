@@ -1,4 +1,4 @@
-// The Qwen3.6 MoE router: fp32 logits on tensor cores, softmax top-k with a sigmoid-gated shared slot, the slot-order combine.
+// The Qwen3.6 MoE router: fp32 logits on tensor cores, softmax top-k with a sigmoid-gated shared slot, slot combine.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -40,7 +40,7 @@ __device__ __forceinline__ void copy16(void* dst, const void* src, bool valid) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(d), "l"(src), "r"(n));
 }
 
-// Block (16-row tile, 32 experts, 4 warps of 8): OUT[m][e] = x[m] . w[e], mma.m16n8k16 chained over K in order, K staged through shared memory.
+// Block (16-row tile, 32 experts, 4 warps of 8): OUT[m][e] = x[m] . w[e], mma.m16n8k16 chained over K in shared.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_router(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                    float* __restrict__ OUT, int M, int x_stride, int D, int NE) {
     extern __shared__ __align__(16) __nv_bfloat16 smem[];
@@ -94,7 +94,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qwen_router(const __nv_bflo
     if (row0 + g + 8 < M && e + 1 < NE) OUT[static_cast<int64_t>(row0 + g + 8) * NE + e + 1] = c3;
 }
 
-// One warp a row: top-k by logit (lower id on ties), weights exp(l_k - l_0) / sum as bf16, then the shared slot's sigmoid gate.
+// One warp a row: top-k by logit (lower id on ties), weights exp(l_k - l_0) / sum as bf16, then the shared gate.
 extern "C" __global__ void __launch_bounds__(32) tf_qwen_topk(const float* __restrict__ L, int* __restrict__ PICK, float* __restrict__ WTS, int NE,
                                                                 int NL, int TOPK) {
     tf_grid_wait();
@@ -166,7 +166,7 @@ template <> __device__ __forceinline__ void load4<__nv_bfloat16>(const __nv_bflo
     v[2] = __uint_as_float(q.y << 16), v[3] = __uint_as_float(q.y & 0xFFFF0000u);
 }
 
-// Block (row, 512 columns), four a thread: the slots summed in slot order as fp32 w * y fused multiply-adds, rounded once to bf16.
+// Block (row, 512 columns), four a thread: slots summed in slot order as fp32 w * y fmas, rounded once to bf16.
 template <typename T>
 __device__ __forceinline__ void combine(const T* __restrict__ Y, const float* __restrict__ W, __nv_bfloat16* __restrict__ OUT, int S, int D) {
     tf_grid_wait();
@@ -196,7 +196,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qwen_combine_bf16(const __n
     combine<__nv_bfloat16>(Y, W, OUT, S, D);
 }
 
-// The MTP head's confidence: a bf16 logits row's max and sum of exp(x - max), torch.softmax's float32 normalizer (fixed tree).
+// The MTP head's confidence: a bf16 logits row's max and sum of exp(x - max), torch.softmax's float32 normalizer.
 extern "C" __global__ void __launch_bounds__(1024) tf_qwen_row_stats(const __nv_bfloat16* __restrict__ L, int N, float* __restrict__ OUT) {
     __shared__ float part[32];
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;

@@ -1,4 +1,4 @@
-// Qwen3.6's prep kernels (glue.py _gdn_pre, _attn_prep) op for op as Triton ran them: explicit intrinsics, its fused fmas written out.
+// Qwen3.6's prep kernels (glue.py _gdn_pre, _attn_prep) op for op as Triton ran them, fused fmas written out.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -72,7 +72,7 @@ __device__ __forceinline__ float block64_sum(float v, float* part) {
 
 }  // namespace
 
-// Program (row, head), 64 threads of 2 channels: 4-tap conv over [state; qkv], SiLU, q/k norm (DK = 128), v, and g and beta per value head.
+// Program (row, head), 64 threads of 2 channels: 4-tap conv over [state; qkv], SiLU, q/k norm, v, g and beta.
 extern "C" __global__ void __launch_bounds__(64)
     tf_qwen_gdn_pre(const uint16_t* __restrict__ QKV, const uint16_t* __restrict__ CS, const uint16_t* __restrict__ CW,
                     const int* __restrict__ WIN, const uint16_t* __restrict__ A, const uint16_t* __restrict__ B,
@@ -119,7 +119,7 @@ extern "C" __global__ void __launch_bounds__(64)
     BETA[row * VH + hv] = sigmoid_tl(bf(B[row * VH + hv]));
 }
 
-// Program (row, head), 64 threads of 4 elements (D = 256): q heads from the [q | gate] rows, then k heads; norm, then rotate-half rotary.
+// Program (row, head), 64 threads of 4 elements (D = 256): q heads from [q | gate] rows, then k heads; norm, rotary.
 extern "C" __global__ void __launch_bounds__(64)
     tf_qwen_attn_prep(const uint16_t* __restrict__ QG, const uint16_t* __restrict__ KV, const uint16_t* __restrict__ QN,
                       const uint16_t* __restrict__ KN, const int* __restrict__ POS, const float* __restrict__ INV,

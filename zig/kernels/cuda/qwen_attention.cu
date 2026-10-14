@@ -1,5 +1,4 @@
 // Qwen3.6 MoE tree attention (attention.py's _shared, _tail and _merge): Triton's bits from native CUDA.
-// Both dots are mma.m16n8k16 chains in key and head-dim order, softmax is ex2.approx of x * log2(e), l is fma(l, alpha, row sum).
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -140,7 +139,7 @@ __device__ __forceinline__ void load_q(uint32_t (&qf)[16][4], const bf16* lo, co
     }
 }
 
-// attention._tile over `tiles` 64-key tiles: dot chains in key and head-dim order, a row max and sum that meet across the 4 warps (warp w holds keys 8w..8w+7 and 32+8w..32+8w+7).
+// attention._tile over `tiles` 64-key tiles: dot chains in key and head-dim order, row max and sum met across 4 warps.
 template <class Src> __device__ void attend(Smem& sm, Acc& a, const uint32_t (&qf)[16][4], int tiles, const Src& src) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, g = lane >> 2, t4 = lane & 3;
     const int mj = lane >> 3, mi = lane & 7;  // ldmatrix: this lane's matrix and row
@@ -231,7 +230,7 @@ template <class Src> __device__ void attend(Smem& sm, Acc& a, const uint32_t (&q
     }
 }
 
-// Writes this thread's rows of a partial: o to PO[row][d], m to PM[row], l to PL[row]; a null `lo`/`hi` row is not stored.
+// Writes this thread's rows of a partial: o to PO[row][d], m to PM[row], l to PL[row]; a null `lo`/`hi` is skipped.
 __device__ __forceinline__ void store_partial(const Acc& a, float* PO, float* PM, float* PL, int64_t lo, int64_t hi, int w, int g, int t4) {
 #pragma unroll
     for (int q = 0; q < 2; ++q) {
@@ -257,7 +256,7 @@ struct SharedSrc {
 
 }  // namespace
 
-// Block (key head, query tile, item): an item code is a whole 4-chunk group j >= 0, or chunk -1 - j after the whole groups.
+// Block (key head, query tile, item): an item is a whole 4-chunk group j >= 0, or chunk -1 - j after the groups.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_attn_shared(const bf16* __restrict__ Q, const bf16* __restrict__ KC, const bf16* __restrict__ VC,
                                                                         const int64_t* __restrict__ OFF, const int* __restrict__ STREAM, const int* __restrict__ ITEMS,
                                                                         float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL, int W) {
@@ -320,7 +319,7 @@ struct TailSrc {
 
 }  // namespace
 
-// Block (row, key head, tail chunk): the chunk's committed keys below `p` and the row's path, one partial slot per chunk.
+// Block (row, key head, tail chunk): the chunk's committed keys below `p` and the row's path, one slot per chunk.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_attn_tail(const bf16* __restrict__ Q, const bf16* __restrict__ KN, const bf16* __restrict__ VN,
                                                                       const bf16* __restrict__ KC, const bf16* __restrict__ VC, const int64_t* __restrict__ OFF,
                                                                       const int* __restrict__ STREAM, const int* __restrict__ ROWS, const int* __restrict__ PATHS,
@@ -354,7 +353,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qwen_attn_tail(const bf16* 
     store_partial(a, PO, PM, PL, g < G ? row : -1, -1, w, g, t4);
 }
 
-// Block (row, key head, 64 output columns): the partial slots folded in order, each group's chunks first, then o / l as bf16.
+// Block (row, key head, 64 output columns): partial slots folded in order, group chunks first, then o / l as bf16.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_attn_merge(const float* __restrict__ PO, const float* __restrict__ PM, const float* __restrict__ PL,
                                                                        bf16* __restrict__ OUT, const int* __restrict__ STREAM, const int* __restrict__ ROWS, int W) {
     tf_grid_wait();

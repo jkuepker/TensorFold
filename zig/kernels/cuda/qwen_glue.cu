@@ -1,4 +1,4 @@
-// Qwen3.6's row glue (glue.py and qmm.py's group sums, attention.py's paths) with Triton's bits: same element-to-thread order, same trees.
+// Qwen3.6's row glue (glue.py, qmm.py group sums, attention.py paths) with Triton's bits: same element-to-thread order.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -134,7 +134,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_qwen_add_rmsnorm_res(const 
     add_rms<true>(X, R, W, H, Y, XS, eps);
 }
 
-// Block (row, value head), one warp of 4 values per thread: out = bf16(z * sigmoid(z) * (y * rsqrt * w)), xs = its 64-group sums.
+// Block (row, value head), a warp of 4 values per thread: out = bf16(z * sigmoid(z) * (y * rsqrt * w)), xs = sums.
 extern "C" __global__ void __launch_bounds__(32) tf_qwen_gated_norm(const uint16_t* Y, const uint16_t* Z, const uint16_t* W, uint16_t* OUT, float* XS, float eps, int vh) {
     tf_grid_wait();
     const int t = threadIdx.x;
@@ -153,7 +153,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_qwen_gated_norm(const uint16
     if ((t & 15) == 0) XS[head * (DV / 64) + (t >> 4)] = g;
 }
 
-// Block (row, head), 64 threads of 4 values: out = bf16(o * sigmoid(gate)) from the [q | gate] rows, xs = its 64-group sums.
+// Block (row, head), 64 threads of 4 values: out = bf16(o * sigmoid(gate)) from the [q | gate] rows, xs = group sums.
 extern "C" __global__ void __launch_bounds__(64) tf_qwen_gate_mul(const uint16_t* O, const uint16_t* QG, uint16_t* OUT, float* XS, int heads) {
     tf_grid_wait();
     const int t = threadIdx.x;
@@ -170,7 +170,7 @@ extern "C" __global__ void __launch_bounds__(64) tf_qwen_gate_mul(const uint16_t
     if ((t & 15) == 0) XS[head * (GD / 64) + (t >> 4)] = s;
 }
 
-// Block (row, 16 groups), 8 threads of 8 values a group: xs[row][group] = the group's fp32 sum, rows strided by ldx; kg groups a row.
+// Block (row, 16 groups), 8 threads of 8 values a group: xs[row][group] = the group's fp32 sum, rows strided by ldx.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_group_sums(const uint16_t* X, float* XS, int ldx, int kg) {
     tf_grid_wait();
     const int t = threadIdx.x, group = blockIdx.y * 16 + (t >> 3), j = t & 7;
@@ -184,7 +184,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qwen_group_sums(const uint1
     if (j == 0 && group < kg) XS[static_cast<int64_t>(blockIdx.x) * kg + group] = s;
 }
 
-// A thread a node: its root-to-node chain of window rows (parents are rows, -1 at a root) up to 128 deep, and the chain's depth.
+// A thread a node: its root-to-node chain of window rows (parents are rows, -1 at a root), up to 128 deep, and depth.
 extern "C" __global__ void __launch_bounds__(128) tf_qwen_paths(const int* PARENTS, int* PATHS, int* DEPTHS, int rows) {
     tf_grid_wait();
     const int node = blockIdx.x * 128 + threadIdx.x;

@@ -275,7 +275,7 @@ __global__ void plan_scatter(const int* __restrict__ picks, int P, int E, const 
 
 } // namespace tf_experts
 
-// Decode form for groups of 64: up with relu^2 (M 1, epilogue 1) or SwiGLU over gate and up (M 2, epilogue 2), down to fp32 (epilogue 0).
+// Decode form for groups of 64: up with relu^2 or SwiGLU over gate and up, down to fp32 (epilogue 0).
 #define TF_EXPERT(M, EPI) template __global__ void tf_experts::expert_kernel<64, M, EPI, 2, 4>(const __nv_bfloat16*, \
     int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
 TF_EXPERT(1, 1)

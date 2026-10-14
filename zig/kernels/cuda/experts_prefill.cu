@@ -150,7 +150,7 @@ __global__ void __launch_bounds__(WM * WN * 32)
 
 } // namespace tf_experts_prefill
 
-// Prefill form for groups of 64: up with relu^2 (M 1, epilogue 1) or SwiGLU over gate and up (M 2, epilogue 2), down to bf16 (epilogue 3).
+// Prefill form for groups of 64: up with relu^2 or SwiGLU over gate and up, down to bf16 (epilogue 3).
 #define TF_PREFILL(M, EPI) template __global__ void tf_experts_prefill::prefill_kernel<64, M, EPI, 2, 2, 4>( \
     const __nv_bfloat16*, int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
 TF_PREFILL(1, 1)

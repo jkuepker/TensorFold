@@ -1,7 +1,7 @@
-// Programmatic dependent launch: a kernel launched with the PDL attribute may start its blocks while the grid before it is still running.
+// Programmatic dependent launch: a PDL kernel may start its blocks while the grid before it still runs.
 #pragma once
 
-// First statement of every kernel launched with PDL: holds until the grid before it has finished and flushed its writes.
+// First statement of every PDL kernel: holds until the grid before it has finished and flushed its writes.
 __device__ __forceinline__ void tf_grid_wait() {
 #if __CUDA_ARCH__ >= 900
     asm volatile("griddepcontrol.wait;" ::: "memory");
