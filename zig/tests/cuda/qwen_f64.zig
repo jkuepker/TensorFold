@@ -191,7 +191,7 @@ pub const Stat = struct {
         return .{ .at = at, .val = v[at] };
     }
 
-    fn print(s: *const Stat, label: []const u8) void {
+    pub fn print(s: *const Stat, label: []const u8) void {
         const a = worst(s.abs);
         const r = worst(s.rel);
         const q = worst(s.ratio);
