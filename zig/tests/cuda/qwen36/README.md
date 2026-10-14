@@ -151,9 +151,10 @@ not read as 100%.
   committed keys and the row's root path, the mask built from the window's parents; plans come from `round.stage`. Slots past a row's
   last key must hold `l = 0`, `m = -inf`. The phase is the call's total window rows (up to 16 decode, more prompt-sized); a round is staged
   once, so there is no identical-row relaunch. Committed lengths run to 8191 on the rig of the byte-equality test, then a second rig of
-  262400 positions checks 16383 to 262143 (windows of 1 to 8 rows, chains and trees, folded groups of 2048 keys and unfolded
-  chunks; 32768 with 4 rows and 131072 with 1 row sit on the fold threshold, `groups * rows >= 64`), so long folded groups are checked
-  in float64 as well. With a kernel set the captured Triton launches run those lengths too and fill the Triton columns. A slot's exp sum is bounded by
+  262400 positions checks 16383 to 262143 (windows of 1 to 8 rows, and 64 rows at 32768; chains and trees; folded groups of 2048
+  keys and unfolded chunks: a stream folds when `committed / 2048 * rows >= 64`, so 16383 against 16384 with 8 rows, 32768 with 4 rows
+  and 131072 with 1 row sit on the threshold, and 131071 is the longest unfolded stream), so long folded groups are checked in float64 as
+  well. With a kernel set the captured Triton launches run those lengths too and fill the Triton columns. A slot's exp sum is bounded by
   (54 + 6 (chunks - 1)) 2^-24, relative, for the chunks it folds (the ex2.approx, the tile and chain sums, and the rescales of the running
   maximum), and the merge adds 12 units of 2^-24 per fold.
 - `tf-cuda-test qwen-gdn-f64`: the tree kernel's chain (decode) and every schedule-slot class, one and several streams, the prompt
