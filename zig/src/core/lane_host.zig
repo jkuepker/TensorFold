@@ -6,6 +6,7 @@ const pc = @import("prompt_cache.zig");
 const status = @import("lane_host_status.zig");
 const learn = @import("lane_host_learn.zig");
 const lone = @import("lane_host_lone.zig");
+const batch = @import("lane_host_batch.zig");
 const fill = @import("lane_host_fill.zig");
 const admit = @import("lane_host_admit.zig");
 const Allocator = std.mem.Allocator;
@@ -285,64 +286,10 @@ pub const LaneHost = struct {
         h.mutex.unlock(h.io);
     }
 
-    /// Every queued request the lanes have room for: a lone one to the backend's driver, the rest prefilled together.
-    fn admitAll(h: *LaneHost) void {
-        var batch: std.ArrayList(*Job) = .empty;
-        defer batch.deinit(h.gpa);
-        while (true) {
-            const job = switch (h.prepare()) {
-                .none => break,
-                .dropped => continue,
-                .job => |j| j,
-            };
-            if (job.request.max_tokens == 0 and h.info_.warm_turns) {
-                _ = h.warmPass(job, job.began);
-                continue;
-            }
-            if (batch.items.len == 0 and lone.fits(h, job)) {
-                _ = lone.run(h, job, job.began, false);
-                continue;
-            }
-            if (h.core.fills()) {
-                h.filling.append(h.gpa, job) catch {
-                    _ = h.drop(job, "out of memory");
-                };
-                continue;
-            }
-            batch.append(h.gpa, job) catch {
-                _ = h.drop(job, "out of memory");
-                continue;
-            };
-        }
-        if (batch.items.len == 0) return;
-        const streams = h.gpa.alloc(*lanes.Stream, batch.items.len) catch return h.dropAll(batch.items, "out of memory");
-        defer h.gpa.free(streams);
-        const errs = h.gpa.alloc(?anyerror, batch.items.len) catch return h.dropAll(batch.items, "out of memory");
-        defer h.gpa.free(errs);
-        for (streams, batch.items) |*s, job| s.* = &job.stream;
-        h.core.addStreams(streams, errs) catch |e| return h.dropAll(batch.items, h.words(e));
-        for (batch.items, errs) |job, err| {
-            if (err) |e| {
-                _ = switch (e) {
-                    error.Cancelled => h.cancel(job),
-                    error.LaneMemory => h.requeue(job),
-                    else => h.drop(job, h.words(e)),
-                };
-                continue;
-            }
-            h.prefilled(job, job.began);
-            if (h.deliver(job)) h.remove(job);
-        }
-    }
-
-    fn dropAll(h: *LaneHost, jobs: []const *Job, message: []const u8) void {
-        for (jobs) |job| _ = h.drop(job, message);
-    }
-
-    const Prepared = union(enum) { none, dropped, job: *Job };
+    pub const Prepared = union(enum) { none, dropped, job: *Job };
 
     /// The oldest queued request admitted with its stream made, when the lanes have room.
-    fn prepare(h: *LaneHost) Prepared {
+    pub fn prepare(h: *LaneHost) Prepared {
         h.lock();
         if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
@@ -466,7 +413,7 @@ pub const LaneHost = struct {
     }
 
     /// A prompt-only pass on a `warm_turns` engine: the backend prefills, the cache keeps its end (a mark, if keyed on)
-    fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
+    pub fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
         const be = h.core.backend;
         be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
             if (e != error.Cancelled and e != error.Yielded) return h.drop(job, h.words(e));
@@ -494,7 +441,7 @@ pub const LaneHost = struct {
     }
 
     /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
-    fn requeue(h: *LaneHost, job: *Job) bool {
+    pub fn requeue(h: *LaneHost, job: *Job) bool {
         if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
         job.stream.deinit(h.gpa);
         job.proposer.deinit();
@@ -525,7 +472,7 @@ pub const LaneHost = struct {
     const alone_words = "the engine has no memory for this request's caches with nothing else running: lower --context or --parallel";
 
     /// A job cancelled in its prompt pass, its lane already released.
-    fn cancel(h: *LaneHost, job: *Job) bool {
+    pub fn cancel(h: *LaneHost, job: *Job) bool {
         h.remove(job);
         h.finish(job, .cancelled, "");
         return true;
@@ -544,7 +491,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
-            h.admitAll();
+            batch.all(h);
             h.fillOne();
             status.noteLive(h);
             h.lock();
