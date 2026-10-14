@@ -246,9 +246,9 @@ pub const Pair = struct {
     /// One machine-readable line (native, then Triton), then both gates.
     pub fn finish(p: *const Pair, bound_text: []const u8, strict: bool) !void {
         const n = &p.n;
-        std.debug.print("F64 {s} cols={d} native", .{ n.name, n.abs.len });
-        n.print("");
-        if (p.t.count > 0) p.t.print(" triton") else std.debug.print(" triton none", .{});
+        std.debug.print("F64 {s} cols={d}", .{ n.name, n.abs.len });
+        n.print("native");
+        if (p.t.count > 0) p.t.print("triton") else std.debug.print(" triton none", .{});
         std.debug.print(" over={d} bound=\"{s}\" strict={}\n", .{ n.fails, bound_text, strict });
         var failed = false;
         if (strict and n.fails > 0) {

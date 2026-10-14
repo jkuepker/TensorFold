@@ -134,8 +134,13 @@ The byte-equality tests above show the native kernels equal the Python engine's;
 Each reference is computed in float64 on the host from the same input bytes (bf16 and fp32 decoded exactly, nothing taken from a
 native or Triton output), element by element, with a per-element bound built from the rounding points the format forces and the
 condition of the sum. A column's worst absolute error, worst relative error and worst error over its bound are kept over every
-element of that column, and printed as one `F64 <output> ...` line. The relative error is over the larger of the reference and one
-bf16 ulp of the vector's largest value (prep, attention) or of the row norm (GDN), so a cancelling element does not read as 100%.
+element of that column, and printed as one `F64 <output>.<phase> ...` line beside the aggregate over every element of the output: the
+mean absolute error and the RMS error (`mean_abs`, `rms`), so an average never stands in for a worse column. The fields come for native
+and, where a kernel set is given, for Triton. Decode row counts (1 to 16 rows: decode steps, lane rounds, verify windows) and prompt row
+counts (more than 16 rows) are separate lines (`.decode`, `.prompt`), not pooled; where one kernel takes either, a prompt-sized call is
+relaunched on the first 16 rows of the same device buffers, so both are measured on identical rows. The relative error is over the larger
+of the reference and one bf16 ulp of the vector's largest value (prep, attention) or of the row norm (GDN), so a cancelling element does
+not read as 100%.
 
 - `tf-cuda-test qwen-prep-f64 [kernel set]`: `gdn_pre` (q, k, v, g, beta) and `attn_prep` (q, k, rotary) over serving magnitudes
   and heavy tails, bound asserted; with a kernel set, every captured entry also runs on the same inputs, the bound-free extremes of
@@ -144,10 +149,17 @@ bf16 ulp of the vector's largest value (prep, attention) or of the row norm (GDN
 - `tf-cuda-test qwen-attention-f64 [kernel set] [rounds]`: the attention output, and every partial slot's `PO / PL` and `PM + ln PL`
   (the quantities that do not depend on the kernel's own running maximum), against a float64 softmax attention over the stream's
   committed keys and the row's root path, the mask built from the window's parents; plans come from `round.stage`. Slots past a row's
-  last key must hold `l = 0`, `m = -inf`.
+  last key must hold `l = 0`, `m = -inf`. The phase is the call's total window rows (up to 16 decode, more prompt-sized); a round is staged
+  once, so there is no identical-row relaunch. Committed lengths run to 8191 on the rig of the byte-equality test, then a second rig of
+  262400 positions checks 16383 to 262143 (windows of 1 to 8 rows, chains and trees, folded groups of 2048 keys and unfolded
+  chunks; 32768 with 4 rows and 131072 with 1 row sit on the fold threshold, `groups * rows >= 64`), so long folded groups are checked
+  in float64 as well. With a kernel set the captured Triton launches run those lengths too and fill the Triton columns. A slot's exp sum is bounded by
+  (54 + 6 (chunks - 1)) 2^-24, relative, for the chunks it folds (the ex2.approx, the tile and chain sums, and the rescales of the running
+  maximum), and the merge adds 12 units of 2^-24 per fold.
 - `tf-cuda-test qwen-gdn-f64`: the tree kernel's chain (decode) and every schedule-slot class, one and several streams, the prompt
-  chain kernel's output and final state, and the in-place replay of accepted rows, against a float64 gated delta rule. The same rows
-  go through the prompt and the decode chain and are reported separately. A step's fp32 error is bounded by 32 units of 2^-24 of the
+  chain kernel's output and final state, and the in-place replay of accepted rows, against a float64 gated delta rule. The phase is the
+  kernel: the tree kernel's chain, tree and replay are decode, the chunked prompt kernel is prompt. The same rows go through both chains
+  and are reported separately (`gdn.identical_rows_y.decode`, `.prompt`). A step's fp32 error is bounded by 32 units of 2^-24 of the
   state row norm, decayed by `g` down the path, and reaches `y` through `|q|`.
 
 None of the three needs a captured set (`qwen-prep-f64` and `qwen-attention-f64` take one to add the Triton columns; `qwen-gdn-f64` has no
@@ -176,7 +188,40 @@ as they do on the captured one. Point `TENSORFOLD_CUDA_KERNELS` at it.
 
 `qwen_glue.cu` (add_rmsnorm, gated_norm, gate_mul, group_sums, paths) and `embed_rows.cu`'s 4-bit rows replace those Triton launches on a GB10, with the cubins' element-to-thread order, sum trees and `sqrt.approx` / `div.full` / `ex2.approx` primitives. `tf-cuda-test qwen-glue <kernel set>` runs each of the set's entries (pointers an entry lists as unaligned sit 4 bytes off a boundary) beside the native kernel on identical buffers, zero rows, inf and NaN rows, subnormal and wide-range rows, and every row count the engine serves, and compares every output byte. `exact` in `families/qwen27/cuda/glue_native.zig` names the kernels that pass on every shape; a shape outside the tested constants (hidden 2048, 32 value heads of 128, 16 query heads of 256) still replays. `qwen36-layers` and `qwen36-mtp` then run with the native kernels in.
 
-`tf-cuda-test qwen-glue-f64 [<kernel set>|-] [oracle]` checks the same kernels against an independent float64 reference, on top of the byte comparison and without changing a kernel output. The reference is computed on the host in float64 from the same input bytes (`core.norms_ref` for the norm, `core.act_ref` for the sigmoid and the 4-bit dequantisation), never from a native or Triton output, on the differential test's rows without NaN or inf; a row whose fp32 sum of squares overflows is counted as excluded. It runs two passes: `realistic:` (normal, outlier and wide-range rows; `embed` and `paths` run here only) and `stress:` (every other kind of the rig, among them zeros, subnormal, tiny, huge and spread rows). Each output prints one `F64` line: the worst per-column absolute and relative error and the largest error as a fraction of its bound, for native and, with a kernel set, for the captured Triton launch, plus the number of columns where native is worse than Triton (it must be none). The relative error is `|err| / |reference|`, except for a group sum (`XS` lines), where it is divided by the sum of the terms' magnitudes, and for `gate_mul` and `gated_norm` outputs, where the divisor is at least the fp32 sigmoid's flush floor (below 2^-126 the division flushes). Every element must sit inside its bound, half a bf16 ulp of the reference plus the fp32 arithmetic's slack. The fused group sums are checked twice: against the float64 sum of the reference rows, and against the float64 sum of the rows the kernel stored. `paths` is integer-only and must equal the host's chains exactly. With an oracle directory the real dumped `y` rows go through `group_sums` (Triton is the dump's own sums) and every eighth dumped `h` row through `add_rmsnorm`. The run ends with a negative control: one native element per output moved three bounds off its reference must fail that output, and a perturbed `paths` entry must differ.
+`tf-cuda-test qwen-glue-f64 [<kernel set>|-] [oracle]` checks the same kernels against an independent float64 reference, on top of the byte
+comparison and without changing a kernel output. The reference is computed on the host in float64 from the same input bytes (`core.norms_ref`
+for the norm, `core.act_ref` for the sigmoid and the 4-bit dequantisation), never from a native or Triton output, on the differential test's
+rows without NaN or inf; a row whose fp32 sum of squares overflows is counted as excluded.
+
+- Passes: `realistic:` (normal, outlier and wide-range rows; `embed` and `paths` run here only) and `stress:` (every other kind of the rig:
+  zeros, subnormal, tiny, huge and spread rows). The run ends with a negative control: every native element of one column of every
+  output is moved 1.25 bounds off its reference and each output must fail, and a perturbed `paths` entry must differ.
+- Each output prints one `F64` line per phase with the worst per-column absolute and relative error (with the column), the mean absolute
+  and RMS error, and the largest error as a fraction of its bound, for native and, with a kernel set, for the captured Triton launch; native
+  must be no worse than Triton in any column. Rows of 1 to 16 are `.decode`, more are `.prompt`, and each prompt-sized call is relaunched on
+  its first 16 rows of the same buffers, so decode and prompt are measured on identical rows.
+- The relative error is `|err| / |reference|`, except for a group sum (`XS`), where it is divided by the sum of the terms' magnitudes, and for
+  `gate_mul` and `gated_norm`, where the divisor is at least the fp32 sigmoid's flush floor (below 2^-126 the division flushes). Every
+  element must sit inside its bound, half a bf16 ulp of the reference plus the fp32 arithmetic's slack.
+- `add_rmsnorm` with a residual rounds `h = bf16(fp32(x) + fp32(r))` before it normalises, so `H` is checked against that sum rounded on
+  the host (exactly), and `Y` against the norm of the rounded `h` with the norm's own slack only; a kernel that rounded `h` toward zero
+  would put `Y` over its bound without Triton. `H` is also checked against the float64 sum x + r (half a bf16 ulp).
+- Group sums are checked twice: against the float64 sum of the reference rows, and against the float64 sum of the rows the kernel stored.
+  Their bound is the fp32 reduction's own: the number of adds on the deepest path times 2^-24 times sum |terms| (10 for `group_sums` and
+  `add_rmsnorm`: a chain of 8 and the 4-2-1 butterfly; 7 for `gated_norm` and `gate_mul`: a chain of 4 and the 8-4-2-1 butterfly).
+- With an oracle directory the real dumped `y` rows go through `group_sums` (Triton is the dump's own sums), and add_rmsnorm sees the `h`
+  of every eighth dumped `y` file, counted in visiting order over prompts, phases and steps (not every eighth row). Every fourth
+  input-norm call also goes through the residual path as `x` = the previous call's dumped `h` and `r` = the layer's dumped MoE output;
+  the run reports how many of those pairs reproduce the dumped `h` bit for bit.
+- Limit of the group-sum bound: every summation order of the same depth meets the same worst-case bound, so on arbitrary rows no sound
+  bound against float64 can tell a reversed chain, another butterfly order or a pairwise chain from the kernel's order, and the fused
+  `XS` of `add_rmsnorm`, `gated_norm` and `gate_mul` sums the kernel's own outputs, which the test cannot choose. `group_sums` takes any row,
+  so it also runs ladder rows (`group_sums[ladder rows].XS`): a group holding B and seven values just above half an fp32 ulp of B,
+  bounded per element (sum |x_i| gamma(d_i), d_i the adds on x_i's path). The kernel's order errs 0.95 units of 2^-24 B against a
+  bound of 4.0; a chain summed the other way, or a sequential sum, errs 6.9 and fails. A different butterfly order, a pairwise chain
+  and orders no deeper than the kernel's at every element err as the kernel does and pass; only a bit-exact fp32 emulation of the
+  order would tell them apart, and the byte comparison with the captured launch (`qwen-glue`) does.
+
 ## Native tree attention
 
 `kernels/cuda/qwen_attention.cu` (`tree_native.zig`) is attention.py's `_shared`, `_tail` and `_merge` in native CUDA: both dots are
@@ -194,9 +239,12 @@ back to the replay. A kernel set without those three entries (`aot.json` strippe
 `qwen-router-f64`, `qwen-experts-f64` and `qwen-proj-f64` hold the MoE and projection kernels to CONTRIBUTING.md's precision rule, beside the
 byte-equality differentials above and without changing a kernel output. Each output is compared with a host float64 reference computed from
 the same input bytes (bf16 rows, bf16 router rows, MLX 4-bit words with bf16 scales and biases, all dequantized in float64), never from a
-native or Triton output. Every check prints the worst per-column absolute and relative error (`RESULT`), a summary per output (`TABLE`)
-and fails past its bound; relative error is against max(|reference|, the column's largest |reference| / 1024). `CONTROL` lines show the
-check refusing an output moved four bounds away (and, for the router, two picks swapped).
+native or Triton output. Every check prints, per output and phase (`.decode` for 1 to 16 rows, `.prompt` for more), the worst per-column
+absolute and relative error with the column and the mean absolute and RMS error, native and, with a kernel set, Triton (`RESULT` per
+case, `TABLE` per output over the run), and fails past its bound or where native is worse than Triton in a column; relative error is
+against max(|reference|, the column's largest |reference| / 1024). The prompt batches of the experts and the projections also run their
+first 16 rows through the decode kernels, so decode and prompt see identical rows. `CONTROL` lines show the check refusing an output moved
+four bounds away (and, for the router, two picks swapped); `TF_QWEN_F64_PERTURB=<column>` moves that column of every native output.
 
 - `tf-cuda-test qwen-router-f64 <kernel set|native> [fixtures]` (fixtures: `qwen35/capture_router.py`'s dump; the kernel set holds the
   captured `_router`, `_topk_rows`, `_combine`): router logits (bound 2^-16 of sum |x w|, one fp32 rounding per k16 step), the picks
