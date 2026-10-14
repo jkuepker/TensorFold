@@ -1,4 +1,4 @@
-//! Grouped MLX affine-4 experts against recorded fixture bytes (the Python engine's): packing, plan, SwiGLU and relu^2 up, down.
+//! Grouped MLX affine-4 experts against the Python engine's fixture bytes: packing, plan, SwiGLU and relu^2 up, down.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");

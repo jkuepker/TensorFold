@@ -1,4 +1,4 @@
-//! qmm_group's fused launch against one launch a projection, byte for byte, on random 4-bit weights at the Qwen3.6 shapes.
+//! qmm_group's fused launch against one launch per projection, byte for byte, on random 4-bit weights, Qwen3.6 shapes.
 
 const std = @import("std");
 const cuda = @import("cuda");

@@ -1,48 +1,5 @@
 #!/usr/bin/env python3
-"""The Qwen3.6 MoE Python CUDA engine as the Zig engine's oracle: per-layer dumps, MoE routing, GDN state, tokens.
-
-Run it in the Python engine's container on a copy of its tree (never the tree itself), that copy first on PYTHONPATH:
-
-    PYTHONPATH=<copy>/src python3 capture.py --model <checkpoint dir> --out <dump dir>
-    python3 capture.py --compare <dump dir A> <dump dir B>        # two runs hash equal
-
-Prompts (prompts.json): story, code, facts (chat turns of 25 to 35 tokens) and long (about 5,000 tokens of module
-source, which prefill splits evenly into two chunks of about 2,520 rows: chunks() divides a prompt into the fewest
-4,096-row passes of equal size). For each prompt the engine's own passes are dumped as follows.
-
-    <prompt>/cold/stepSSS/      step SSS of the one-row steps from an empty state (up to 32; the chat prompts
-                                are shorter), forced token prompt[SSS], every step dumped
-    <prompt>/prefill/           the whole prompt's prefill pass (long: tensor digests only, digests.json, one chunk
-                                after the other with call numbers running on)
-    <prompt>/state/             the committed state after prefill (see below)
-    <prompt>/warm/stepSSS/      32 teacher-forced one-row steps after prefill, forced token: the prompt's first
-                                greedy token, then each step's greedy argmax (the serial reply; tokens.json)
-    <prompt>/tokens.json        the prompt's hash, forced and sampled tokens, each step's logits sha256, and the
-                                engine's own generate(draft=False) tokens over the same count (must equal)
-
-A pass directory holds raw little-endian tensors (shape and dtype in dump.json: name -> [dtype, shape, sha256]):
-
-    NNN_h.bin NNN_y.bin NNN_xs.bin   the NNN-th add_rmsnorm call: its residual sum h (bf16 [rows, hidden]), the
-                                     normed rows y (bf16), and the y group sums xs (the matmul's activation sums,
-                                     fp32). Calls run in order, two a layer (input norm, then post norm), then the
-                                     final norm of the pass: 81 calls with 40 layers
-    mNN_logits.bin                   MoE call NN (one a layer, the layer's index in a one-chunk pass): router logits,
-                                     fp32 [rows, 257] (256 experts, the shared expert's gate last)
-    mNN_pick.bin  mNN_wts.bin        its picks (int32 [rows, 9]: 8 experts by logit, the lower id on a tie, then
-                                     the shared expert 256) and weights (fp32 [rows, 9])
-    mNN_out.bin                      the layer's MoE output (bf16 [rows, hidden])
-    logits.bin                       a decode step's logits (bf16 [1, vocab])
-
-The state after prefill (<prompt>/state/):
-
-    LNN_rec.bin LNN_conv.bin   delta-net layer NN: the recurrent state (fp32 [32, 128, 128] value heads, value rows,
-                               key columns) and the conv window (bf16 [3, 8192])
-    LNN_k.bin LNN_v.bin        attention layer NN: the cache rows past (bf16 [pos, 2, 256])
-
-weights.txt holds "name sha256 bytes" lines for the engine's loaded weights (tiled 4-bit projections, norms,
-conv, router rows, expert stacks), the lines the Zig upload prints for its own device bytes. manifest.json holds
-every dump file's sha256 and the tree's; timing.json (outside the manifest) holds wall times.
-"""
+"""The Qwen3.6 MoE Python CUDA engine as the Zig engine's oracle: per-layer dumps, MoE routing, GDN state, tokens."""
 
 from __future__ import annotations
 
@@ -274,8 +231,21 @@ def compare(a: Path, b: Path) -> int:
     return 0 if not bad else 1
 
 
+USAGE = (
+    "The Qwen3.6 MoE Python CUDA engine as the Zig engine's oracle: per-layer dumps, MoE routing, GDN state, tokens.\n"
+    "\n"
+    "Run it in the Python engine's container on a copy of its tree (never the tree itself), that copy on PYTHONPATH:\n"
+    "\n"
+    "    PYTHONPATH=<copy>/src python3 capture.py --model <checkpoint dir> --out <dump dir>\n"
+    "    python3 capture.py --compare <dump dir A> <dump dir B>        # two runs hash equal\n"
+    "\n"
+    "Prompts (prompts.json): story, code, facts (chat turns of 25 to 35 tokens) and long (about 5,000 tokens of\n"
+    "module source, which prefill splits evenly into two chunks of about 2,520 rows). Dump layout: README.md.\n"
+)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model")
     ap.add_argument("--out")
     ap.add_argument("--compare", nargs=2, metavar="DIR")

@@ -1,5 +1,4 @@
-//! The Qwen3.6 MTP head against the Python engine's dumps (qwen36/capture.py --mtp), byte for byte: every call's norms,
-//! normed rows and draft logits, replayed in the order the Python engine made them over the head's own cache.
+//! The Qwen3.6 MTP head against the Python engine's dumps (qwen36/capture.py --mtp), byte for byte, in call order.
 
 const std = @import("std");
 const cuda = @import("cuda");

@@ -1,5 +1,4 @@
-//! Qwen3.6 tree attention: qwen_attention.cu's _shared, _tail and _merge against the captured Triton cubins on identical buffers,
-//! over plans the engine's own round.stage builds. Partials (every slot, 0xff-filled first) and the bf16 output must be byte-equal.
+//! Qwen3.6 tree attention: qwen_attention.cu's _shared, _tail and _merge against captured Triton cubins, byte-equal.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -95,7 +94,7 @@ const Rig = struct {
         try b.l.fill8(0xff, r.s.handle);
     }
 
-    // Each stream's caches (OFF a multiple of 8 elements): the pristine rows below its committed length, NaN words above.
+    // Each stream's caches (OFF a multiple of 8 elements): pristine rows below its committed length, NaN words above.
     fn load(r: *Rig, specs: []const Spec, pool: usize) !void {
         const o = r.ops();
         for (specs, 0..) |sp, i| {
@@ -328,7 +327,7 @@ fn variant(rig: *Rig, vi: usize) !void {
         try rig.nat.tail(rig.s, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, plan, rig.part[1].parts());
         try rig.partials(name, sg.slots, plan.width);
     } else {
-        // merge both from the same partials: the native shared and tail kernels' (or the replayed, when a plan lacks them) in place
+        // merge both from the same partials: the native shared and tail kernels' (or the replayed ones) in place
         const aligned = sg.r.attn;
         try rig.nat.shared(rig.s, rig.q.ptr, rig.scratch.origin, offs, aligned, rig.part[0].parts());
         try rig.nat.tail(rig.s, rig.q.ptr, rig.kn.ptr, rig.vn.ptr, rig.scratch.origin, offs, aligned, rig.part[0].parts());

@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.6 served through the native CUDA server against the Python 0.6.6 engine's recorded answers (stdlib only).
-
-  serve_check.py record URL FIXTURE   against a Python 0.6.6 server (serial, drafts off): writes the fixture
-  serve_check.py check URL FIXTURE    against the native server: reruns it and compares
-  serve_check.py check URL FIXTURE --draft-off   the same with "draft": false on every request (serial on a drafting server)
-
-The fixture holds each request body, the chat prompt's token ids (/tokenize) and the greedy reply's token ids and
-parsed tool calls. `check` compares in this order and exits 1 on any difference: (a) prompt ids, (b) reply ids,
-(c) tool calls. Requests marked ids_only (the thinking-on template) skip (b) and (c).
-"""
+"""Qwen3.6 served through the native CUDA server against the Python 0.6.6 engine's recorded answers (stdlib only)."""
 
 from __future__ import annotations
 
@@ -52,7 +43,7 @@ def post(url: str, path: str, body: dict) -> dict:
 
 
 def long_text(url: str, target: int) -> str:
-    """Numbered facts, one sentence each, until the chat prompt is about `target` tokens (the fixture keeps the text)."""
+    """Numbered facts, one sentence each, until the chat prompt is about `target` tokens."""
     lines: list[str] = []
     while True:
         n = len(lines) + 1
@@ -166,9 +157,23 @@ def check(url: str, path: str, draft_off: bool = False) -> int:
     return 1 if failed else 0
 
 
+USAGE = (
+    "Qwen3.6 served through the native CUDA server against the Python 0.6.6 engine's recorded answers.\n"
+    "\n"
+    "  serve_check.py record URL FIXTURE   against a Python 0.6.6 server (serial, drafts off): writes the fixture\n"
+    "  serve_check.py check URL FIXTURE    against the native server: reruns it and compares\n"
+    "  serve_check.py check URL FIXTURE --draft-off\n"
+    "                                      the same with \"draft\": false on every request (serial on a drafting one)\n"
+    "\n"
+    "The fixture holds each request body, the chat prompt's token ids (/tokenize) and the greedy reply's token ids\n"
+    "and parsed tool calls. `check` compares in this order and exits 1 on any difference: (a) prompt ids, (b) reply\n"
+    "ids, (c) tool calls. Requests marked ids_only (the thinking-on template) skip (b) and (c).\n"
+)
+
+
 if __name__ == "__main__":
     if len(sys.argv) not in (4, 5) or sys.argv[1] not in ("record", "check") or (len(sys.argv) == 5 and (sys.argv[1] != "check" or sys.argv[4] != "--draft-off")):
-        sys.exit(__doc__)
+        sys.exit(USAGE)
     if sys.argv[1] == "record":
         sys.exit(record(sys.argv[2], sys.argv[3]))
     sys.exit(check(sys.argv[2], sys.argv[3], len(sys.argv) == 5))

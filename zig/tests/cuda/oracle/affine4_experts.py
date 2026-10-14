@@ -1,4 +1,4 @@
-"""Fixtures for `tf-cuda-test affine4-experts`: the Python engine's grouped MLX 4-bit experts (cuda.experts), SwiGLU and relu^2."""
+"""Fixtures for `tf-cuda-test affine4-experts`: the Python engine's grouped MLX 4-bit experts, SwiGLU and relu^2."""
 import argparse
 import sys
 from pathlib import Path

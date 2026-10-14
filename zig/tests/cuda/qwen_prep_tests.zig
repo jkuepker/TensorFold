@@ -1,4 +1,4 @@
-//! Qwen3.6's prep kernels (glue.gdn_pre, glue.attn_prep): qwen_prep.cu against every captured Triton variant, whole outputs byte for byte.
+//! Qwen3.6's prep kernels (glue.gdn_pre, glue.attn_prep): qwen_prep.cu against every captured Triton variant.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -14,7 +14,7 @@ const keep = 3;
 const gdn_shape: tri.Gdn = .{ .c = 8192, .kh = 16, .vh = 32, .dk = 128, .keep = keep };
 const attn_shape: tri.Attn = .{ .heads = 16, .kv_heads = 2, .dim = 256, .half = 32 };
 
-// Every row count the engine serves (decode, lane and verify rows, prompt chunks up to 4096), the odd ones the capture never launched too.
+// Every row count the engine serves (decode, lane, verify rows, prompt chunks up to 4096), plus odd ones uncaptured.
 const row_counts = blk: {
     var l: [64]usize = undefined;
     var n: usize = 0;
@@ -35,7 +35,7 @@ fn bf16(v: f32) u16 {
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
-// A device buffer padded 0xff on both sides; `shifted` puts the data 4 bytes past a 16-byte boundary, as Triton's specialization sees it.
+// A device buffer padded 0xff on both sides; `shifted` puts the data 4 bytes past a 16-byte boundary (Triton's view).
 const Buf = struct {
     b: cuda.DeviceBuffer,
     off: usize,

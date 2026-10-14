@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.6 MTP drafts through the native CUDA server against "draft": false and the Python 0.6.6 engine (stdlib only).
-
-  mtp_check.py URL FIXTURE ORACLE   FIXTURE: serve_check.py's; ORACLE: capture.py --mtp's folder (prompts.json, <prompt>/<kind>/tokens.json)
-
-For the fixture's chat requests (greedy, thinking off) and for the oracle's four prompts (greedy, and one seeded sampled
-request each, sent as token ids): the drafted reply must equal the same request with "draft": false token for token,
-and the Python engine's serial reply. Acceptance per request is printed beside the Python engine's own on the same prompt.
-"""
+"""Qwen3.6 MTP drafts through the native CUDA server against "draft": false and the Python engine (stdlib only)."""
 
 from __future__ import annotations
 
@@ -71,7 +64,20 @@ def main(url: str, fixture_path: str, oracle: str) -> int:
     return 1 if failed else 0
 
 
+USAGE = (
+    "Qwen3.6 MTP drafts through the native CUDA server against \"draft\": false and the Python engine.\n"
+    "\n"
+    "  mtp_check.py URL FIXTURE ORACLE\n"
+    "      FIXTURE: serve_check.py's; ORACLE: capture.py --mtp's folder (prompts.json, <prompt>/<kind>/tokens.json)\n"
+    "\n"
+    "For the fixture's chat requests (greedy, thinking off) and for the oracle's four prompts (greedy, and one seeded\n"
+    "sampled request each, sent as token ids): the drafted reply must equal the same request with\n"
+    "\"draft\": false token for token, and the Python engine's serial reply. Acceptance per request is printed\n"
+    "beside the Python engine's own on the same prompt.\n"
+)
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        sys.exit(__doc__)
+        sys.exit(USAGE)
     sys.exit(main(*sys.argv[1:]))

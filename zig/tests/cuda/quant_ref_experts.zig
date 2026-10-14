@@ -1,4 +1,4 @@
-//! Grouped FP8, NVFP4 and MLX affine-4 experts against float64 references: a routed plan, SwiGLU gate-up, down to fp32 pair rows.
+//! Grouped FP8, NVFP4 and MLX affine-4 experts against float64 references: plan, SwiGLU gate-up, down to fp32 rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -156,7 +156,7 @@ fn fp4Mat(r: *Rig, n: usize, k: usize) !Fp4M {
     return .{ .codes = codes, .scales = scales, .global = global, .n = n, .k = k };
 }
 
-/// MLX affine-4 words (n, k/8) with bf16 scales and biases (n, k/64), per expert; `rounded` is the prompt kernel's bf16 weight.
+/// MLX affine-4 words (n, k/8) with bf16 scales and biases (n, k/64) per expert; `rounded` is the prompt bf16 weight.
 const A4M = struct { words: []const u32, scales: []const u16, biases: []const u16, n: usize, k: usize, rounded: bool };
 fn a4Val(c: A4M, e: usize, row: usize, col: usize) f64 {
     const q: f64 = @floatFromInt((c.words[(e * c.n + row) * (c.k / 8) + col / 8] >> @intCast(4 * (col % 8))) & 0xF);
@@ -182,7 +182,7 @@ fn a4Dev(r: *Rig, m: A4M) !experts.Affine4Experts.Mats {
     return .{ .words = try r.dev(std.mem.sliceAsBytes(m.words)), .scales = try r.dev(std.mem.sliceAsBytes(m.scales)), .biases = try r.dev(std.mem.sliceAsBytes(m.biases)) };
 }
 
-/// MLX affine-4 with SwiGLU gate and up, packed on the device as experts.make stacks them; decode, prompt and a clamped layer.
+/// MLX affine-4 with SwiGLU gate and up, packed as experts.make stacks them; decode, prompt and a clamped layer.
 fn affine4(r: *Rig, router: grouped.Router, x: []const u16) !void {
     var kmods: [3]cuda.Module = undefined;
     for ([_][]const u8{ cuda.kernels.experts, cuda.kernels.experts_prefill, cuda.kernels.experts_pack }, &kmods) |blob, *m| m.* = try cuda.Module.load(r.gpu.d, blob);

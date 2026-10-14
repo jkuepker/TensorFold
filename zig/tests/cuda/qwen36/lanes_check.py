@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.6 concurrent streams on the native CUDA server: each stream equals the same request alone (stdlib only).
-
-  lanes_check.py URL FIXTURE ORACLE [COUNTS]   COUNTS: stream counts to try, default 1,4,8
-
-Requests: the fixture's chat requests (greedy, thinking off) and the oracle's four prompts as token ids, plus one seeded
-sampled request. Each runs alone first (the reference); then N of them are sent at once, N in COUNTS (the 5k-token
-prompt among them, so a prefill overlaps the others' decoding). Every reply's ids must equal its solo ids token for token;
-the oracle prompts' also equal the Python engine's serial reply. Then the same with every second one sent with
-"draft": false. Run the server with --parallel of at least the largest N.
-"""
+"""Qwen3.6 concurrent streams on the native CUDA server: each stream equals the same request alone (stdlib only)."""
 
 from __future__ import annotations
 
@@ -100,7 +91,20 @@ def main(url: str, fixture: str, oracle: str, counts: str = "1,4,8") -> int:
     return 1 if failed else 0
 
 
+USAGE = (
+    "Qwen3.6 concurrent streams on the native CUDA server: each stream equals the same request alone.\n"
+    "\n"
+    "  lanes_check.py URL FIXTURE ORACLE [COUNTS]   COUNTS: stream counts to try, default 1,4,8\n"
+    "\n"
+    "Requests: the fixture's chat requests (greedy, thinking off) and the oracle's four prompts as token ids, plus\n"
+    "one seeded sampled request. Each runs alone first (the reference); then N of them are sent at once, N in COUNTS\n"
+    "(the 5k-token prompt among them, so a prefill overlaps the others' decoding). Every reply's ids must equal its\n"
+    "solo ids token for token; the oracle prompts' also equal the Python engine's serial reply. Then the same with\n"
+    "every second one sent with \"draft\": false. Run the server with --parallel of at least the largest N.\n"
+)
+
+
 if __name__ == "__main__":
     if len(sys.argv) not in (4, 5):
-        sys.exit(__doc__)
+        sys.exit(USAGE)
     sys.exit(main(*sys.argv[1:]))

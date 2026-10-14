@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.6 prompt cache on the native CUDA server: a conversation's next turn with the cache on equals the cache off (stdlib only).
-
-  cache_check.py record URL FIXTURE   against a server run with --prompt-cache-gib 0: writes each turn's token ids
-  cache_check.py check URL FIXTURE    against a server with the cache on: reruns the turns and compares
-
-Three conversations (a short chat, a three-turn chat, a ~5k-token history) are sent turn by turn, each turn's history
-the fixed assistant text below, so both servers see the same prompts. `check` exits 1 unless every turn's reply ids
-equal the recorded ones token for token, every turn after a conversation's first restored kept tokens (usage's
-cached_tokens), and /metrics counts exactly those tokens as prefix cache hits.
-"""
+"""Qwen3.6 prompt cache on the native CUDA server: the next turn with the cache on equals the cache off (stdlib)."""
 
 from __future__ import annotations
 
@@ -35,7 +26,7 @@ CHATS = {
 
 
 def turns(history: list[tuple[str, str]]) -> list[list[dict]]:
-    """Message lists, one per turn: a conversation's system text and user questions, the assistant texts between them."""
+    """Message lists, one per turn: the conversation's system text, user questions and the assistant texts between."""
     system, first = history[0]
     messages = [{"role": "system", "content": system}, {"role": "user", "content": first}]
     out = [list(messages)]
@@ -120,7 +111,20 @@ def check(url: str, path: str) -> int:
     return 1 if failed else 0
 
 
+USAGE = (
+    "Qwen3.6 prompt cache on the native CUDA server: the next turn with the cache on equals the cache off.\n"
+    "\n"
+    "  cache_check.py record URL FIXTURE   against a server run with --prompt-cache-gib 0: writes each turn's ids\n"
+    "  cache_check.py check URL FIXTURE    against a server with the cache on: reruns the turns and compares\n"
+    "\n"
+    "Three conversations (a short chat, a three-turn chat, a ~5k-token history) are sent turn by turn, each turn's\n"
+    "history the fixed assistant text below, so both servers see the same prompts. `check` exits 1 unless\n"
+    "every turn's reply ids equal the recorded ones token for token, every turn after a conversation's first\n"
+    "restored kept tokens (usage's cached_tokens), and /metrics counts exactly those tokens as prefix cache hits.\n"
+)
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 4 or sys.argv[1] not in ("record", "check"):
-        sys.exit(__doc__)
+        sys.exit(USAGE)
     sys.exit((record if sys.argv[1] == "record" else check)(sys.argv[2], sys.argv[3]))

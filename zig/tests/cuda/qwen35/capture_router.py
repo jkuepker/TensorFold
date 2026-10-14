@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Qwen3.6 MoE router as the Zig engine's oracle: Triton launches of router, top-k and combine, with their inputs and outputs."""
+"""The Qwen3.6 MoE router as the Zig engine's oracle: Triton launches of router, top-k and combine, with I/O."""
 
 from __future__ import annotations
 

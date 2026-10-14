@@ -1,4 +1,4 @@
-//! Qwen3.6's router: the captured Triton launches against the Python engine's bytes (qwen35/capture_router.py), the native kernels against both.
+//! Qwen3.6's router: captured Triton launches against the Python engine's bytes, the native kernels against both.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -164,7 +164,7 @@ fn bf16(v: f32) u16 {
 // Rows of the first sweep rounds: an engine prompt chunk and the 4096-row chunk limit.
 const big_rows = [_]usize{ 1509, 4096 };
 
-// Native against the replay on random inputs the Python run did not draw: scales, ties and row counts across every tile.
+// Native against the replay on random inputs the Python run did not draw: scales, ties and row counts across tiles.
 fn sweep(r: *Rig, rounds: usize) !void {
     const gpa = r.gpu.gpa;
     var prng = std.Random.DefaultPrng.init(0x5eed_70c4);

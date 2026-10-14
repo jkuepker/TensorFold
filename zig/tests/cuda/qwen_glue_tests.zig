@@ -1,5 +1,4 @@
-//! Qwen3.6's row glue: qwen_glue.cu and embed_rows.cu against the captured Triton launches on identical buffers, every output byte compared.
-//! One case per aot.json entry of each kernel (pointers the entry lists as unaligned sit 4 bytes off a boundary, so Set.find lands on exactly it).
+//! Qwen3.6's row glue: qwen_glue.cu and embed_rows.cu against the captured Triton launches, one case per aot entry.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -309,7 +308,7 @@ fn groupSums(r: *Rig, spec: anytype) !void {
     r.finish();
 }
 
-// Real rows: every dumped y (NNN_y.bin, rows of 2048 bf16) of the oracle's steps and prefill chunks through group_sums, replay against native.
+// Real rows: every dumped y (NNN_y.bin) of the oracle's steps and prefill chunks through group_sums, replay vs native.
 fn realSums(r: *Rig, spec: anytype, oracle: []const u8) !void {
     const k: usize = @intCast(cint(spec, "KG") * cint(spec, "GS"));
     var label: [48]u8 = undefined;

@@ -1,4 +1,4 @@
-//! The Qwen3.6 engine against the Python engine's dumps (qwen36/capture.py), byte for byte: norms, MoE layers, logits, state.
+//! The Qwen3.6 engine against the Python engine's dumps (qwen36/capture.py), byte for byte: norms, MoE, logits, state.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -324,7 +324,7 @@ fn step(r: *Run, seq: *st.Seq, root: []const u8, phase: []const u8, forced: []co
     }
 }
 
-/// The committed state after a prefill: each DeltaNet layer's recurrence and conv window, each attention layer's cache rows.
+/// The committed state after a prefill: each DeltaNet layer's recurrence and conv window, each attention cache's rows.
 fn state(r: *Run, seq: *const st.Seq, dir: []const u8) !void {
     const g = r.w.base.g;
     try r.begin("{s}", .{dir}, false);

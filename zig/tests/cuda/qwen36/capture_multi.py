@@ -1,13 +1,4 @@
-"""Qwen3.6 concurrent drafted rounds, Python engine's side (capture.py --lanes N): the Triton launches of shared rounds.
-
-Run beside capture.py in the engine's container, with the launch recorder installed (--tools):
-
-    PYTHONPATH=<copy>/src python3 capture.py --lanes 8 --model <checkpoint> --out <dir> --tools <triton tools>
-
-Starts the engine with N streams (its kernels warmed for every stream count), then sends N requests at once, greedy and
-seeded sampled, drafted and not, so launches.json holds the MULTI variants of the glue kernels and every row-count
-alignment a shared round can take. Each reply is also written (tokens.json) for a comparison with the Zig engine.
-"""
+"""Qwen3.6 concurrent drafted rounds, Python engine's side (capture.py --lanes N): Triton launches of shared rounds."""
 
 from __future__ import annotations
 

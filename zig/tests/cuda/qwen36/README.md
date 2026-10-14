@@ -2,7 +2,7 @@
 
 `capture.py` runs the Python CUDA engine on stock Qwen3.6-35B-A3B MLX 4-bit and dumps, per prompt: every
 norm's `h`, `y` and `xs`, every MoE layer's router logits, picks, weights and output, each step's logits and the
-state a prefill commits (the layout is in its docstring). Two runs of it hash equal.
+state a prefill commits (the layout is under Dump layout below). Two runs of it hash equal.
 
 1. Dumps and the Triton launches, in the Python engine's container, on a copy of its tree:
    `TRITON_CACHE_DIR=<cache> PYTHONPATH=<copy>/src python3 capture.py --model <checkpoint> --out <dumps> --tools <folder of triton_aot_manifest.py>`
@@ -19,6 +19,51 @@ answers like the Python 0.6.6 engine run serial. `serve_check.py record URL FIXT
 ids (/tokenize), greedy reply ids (`return_token_ids`, temperature 0, 256 tokens, thinking off) and parsed tool calls;
 `serve_check.py check URL FIXTURE` reruns the fixture against any server and compares the chat template's ids (a), the
 reply ids (b) and the tool calls (c). Stdlib Python only.
+
+## Dump layout
+
+Prompts (`prompts.json`): story, code, facts (chat turns of 25 to 35 tokens) and long (about 5,000 tokens of module
+source, which prefill splits evenly into two chunks of about 2,520 rows: `chunks()` divides a prompt into the fewest
+4,096-row passes of equal size). For each prompt the engine's own passes are dumped as follows.
+
+```text
+<prompt>/cold/stepSSS/      step SSS of the one-row steps from an empty state (up to 32; the chat prompts
+                            are shorter), forced token prompt[SSS], every step dumped
+<prompt>/prefill/           the whole prompt's prefill pass (long: tensor digests only, digests.json, one chunk
+                            after the other with call numbers running on)
+<prompt>/state/             the committed state after prefill (see below)
+<prompt>/warm/stepSSS/      32 teacher-forced one-row steps after prefill, forced token: the prompt's first
+                            greedy token, then each step's greedy argmax (the serial reply; tokens.json)
+<prompt>/tokens.json        the prompt's hash, forced and sampled tokens, each step's logits sha256, and the
+                            engine's own generate(draft=False) tokens over the same count (must equal)
+```
+
+A pass directory holds raw little-endian tensors (shape and dtype in `dump.json`: name -> [dtype, shape, sha256]):
+
+```text
+NNN_h.bin NNN_y.bin NNN_xs.bin   the NNN-th add_rmsnorm call: its residual sum h (bf16 [rows, hidden]), the
+                                 normed rows y (bf16), and the y group sums xs (the matmul's activation sums,
+                                 fp32). Calls run in order, two a layer (input norm, then post norm), then the
+                                 final norm of the pass: 81 calls with 40 layers
+mNN_logits.bin                   MoE call NN (one a layer, the layer's index in a one-chunk pass): router logits,
+                                 fp32 [rows, 257] (256 experts, the shared expert's gate last)
+mNN_pick.bin  mNN_wts.bin        its picks (int32 [rows, 9]: 8 experts by logit, the lower id on a tie, then
+                                 the shared expert 256) and weights (fp32 [rows, 9])
+mNN_out.bin                      the layer's MoE output (bf16 [rows, hidden])
+logits.bin                       a decode step's logits (bf16 [1, vocab])
+```
+
+The state after prefill (`<prompt>/state/`):
+
+```text
+LNN_rec.bin LNN_conv.bin   delta-net layer NN: the recurrent state (fp32 [32, 128, 128] value heads, value rows,
+                           key columns) and the conv window (bf16 [3, 8192])
+LNN_k.bin LNN_v.bin        attention layer NN: the cache rows past (bf16 [pos, 2, 256])
+```
+
+`weights.txt` holds "name sha256 bytes" lines for the engine's loaded weights (tiled 4-bit projections, norms,
+conv, router rows, expert stacks), the lines the Zig upload prints for its own device bytes. `manifest.json` holds
+every dump file's sha256 and the tree's; `timing.json` (outside the manifest) holds wall times.
 
 ## MTP drafts
 

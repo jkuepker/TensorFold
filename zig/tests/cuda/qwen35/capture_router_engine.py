@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Qwen3.6 CUDA engine's own router launches: real weights and activations dumped as capture_router.py's fixtures, every Triton launch recorded."""
+"""The Qwen3.6 CUDA engine's own router launches: real weights and activations dumped as capture_router.py fixtures."""
 
 from __future__ import annotations
 

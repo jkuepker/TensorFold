@@ -1,28 +1,4 @@
-"""The Qwen3.6 MTP head and its drafted rounds on the Python CUDA engine, as the Zig engine's oracle (capture.py --mtp).
-
-Run beside capture.py (it imports this file) in the engine's container, the same way:
-
-    PYTHONPATH=<copy>/src python3 capture.py --mtp --model <checkpoint> --out <dump dir> [--tools <triton tools>]
-
-For each prompt of capture.py (story, code, facts, long), `<prompt>/` holds
-
-    greedy/calls.json     every MTP head call in order (the prompt's chunks, then each round's carry absorb and
-                          chained steps): {i, dir, phase, n, p0, tokens, logits}
-    greedy/cNNN/          one call: states.bin (bf16 [n, hidden], the target's final normed rows it reads), out.bin
-                          (bf16 [n, hidden], its normed rows), logits.bin (bf16 [1, draft ids], from the last row,
-                          step calls only), and the pass dumps capture.py writes: 000_h/y/xs ... 004_* (the five
-                          add_rmsnorm calls: embedding norm, state norm, input norm, post norm, final norm),
-                          m00_logits/pick/wts/out (the head's MoE). The long prompt keeps digests for the pass dumps.
-    greedy/rounds.json    each drafted round: pending, window tokens, kept path, new tokens, the guesses (position,
-                          token, head probability), copy or head drafted
-    greedy/verify/wNN/    the first verify pass of each window width (2 to 16): its norms and MoE dumps, logits, states
-    greedy/tokens.json    the eager drafted tokens, the engine's generate(draft=True) tokens (CUDA graphs) and
-                          generate(draft=False) tokens, drafted/accepted/rounds totals of each drafted run
-    sampled/              the same without dumps, for one seeded sampled request (rounds.json, tokens.json)
-
-mtp_weights.txt holds "name sha256 bytes" lines of the head's device tensors and its draft head (the restricted,
-re-tiled lm_head rows, and the ids). manifest.json holds every file's sha256.
-"""
+"""The Qwen3.6 MTP head and its drafted rounds on the Python CUDA engine, as the Zig oracle (capture.py --mtp)."""
 
 from __future__ import annotations
 

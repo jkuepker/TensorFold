@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild a captured Triton kernel set so every kernel waits on the grid before it, and mark it `pdl` in aot.json.
-
-Programmatic dependent launch lets a kernel's launch be staged while the one before it still runs. The staged kernel
-must begin with `griddepcontrol.wait` (it holds until the earlier grid has finished and flushed its writes), which
-Triton kernels do not have. Each kernel's PTX is found in a Triton cache by its hash, `griddepcontrol.wait;` goes in
-as the first instruction, and ptxas builds the cubin with Triton's own command line. Before patching, the unpatched
-PTX is built too and must reproduce the captured cubin byte for byte; if it does not, the toolchain differs and the
-kernel is refused.
-
-  aot_pdl.py --set <kernel set> --cache <Triton cache> [--cache ...] --ptxas <ptxas> --out <new kernel set>
-"""
+"""Rebuild a captured Triton kernel set so every kernel waits on the grid before it, and mark it `pdl` in aot.json."""
 import argparse
 import json
 import os
