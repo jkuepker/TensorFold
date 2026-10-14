@@ -1,4 +1,4 @@
-//! The MTP head's draft vocabulary: the Python package's token ids the head scores (qwen4_exp/cuda/draft_vocab.txt).
+//! The MTP head's draft vocabulary: the Python package's token ids the head scores, Flash Next's default list.
 
 const std = @import("std");
 
@@ -24,9 +24,9 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8, vocab: usize) ![]u32 {
     return ids.toOwnedSlice(gpa);
 }
 
-/// The draft vocabulary (draft_ids.txt beside this file), embedded at build time.
+/// The draft vocabulary (flashnext/draft_vocab_default.txt, the list both families share), embedded at build time.
 pub fn load(gpa: std.mem.Allocator, vocab: usize) ![]u32 {
-    return parse(gpa, @embedFile("draft_ids.txt"), vocab);
+    return parse(gpa, @import("draft_vocab").text, vocab);
 }
 
 test "draft ids sort, drop repeats and refuse ids past the vocabulary" {

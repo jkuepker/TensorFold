@@ -163,7 +163,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen27, mods.qwen35, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
-/// Qwen3.5-family models on the GPU (zig/src/families/qwen3_5/cuda.zig): the MoE checkpoint's weights, router and experts.
+/// Qwen3.5-family models on the GPU (qwen3_5/cuda.zig): the MoE checkpoint's weights, router and experts.
 fn qwen35Cuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, qwen27: *std.Build.Module) *std.Build.Module {
     const gpu = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     gpu.addImport("cuda", cuda);
@@ -171,6 +171,10 @@ fn qwen35Cuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     gpu.addImport("lanes", lanes);
     gpu.addImport("qwen27", qwen27);
     gpu.addImport("qwen35", qwen35Loader(b, target, optimize, core));
+    // the MTP head's draft vocabulary is Flash Next's default list, the one file the Python package shares
+    const vocab = b.addWriteFiles();
+    _ = vocab.addCopyFile(b.path("zig/src/families/flashnext/draft_vocab_default.txt"), "draft_vocab.txt");
+    gpu.addImport("draft_vocab", b.createModule(.{ .root_source_file = vocab.add("draft_vocab.zig", "pub const text = @embedFile(\"draft_vocab.txt\");\n") }));
     return gpu;
 }
 
