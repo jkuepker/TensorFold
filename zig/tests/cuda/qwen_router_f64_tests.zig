@@ -3,7 +3,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const router = @import("qwen35_cuda").router;
 const check = @import("check.zig");
-const st = @import("moe_f64_stats.zig");
+const st = @import("qwen_f64.zig");
+const rep = @import("qwen_moe_f64_report.zig");
 
 const Gpu = check.Gpu;
 
@@ -16,8 +17,6 @@ const combine_bound = 0x1p-20;
 
 const Out = enum { logits, weights, combine_f32, combine_bf16 };
 
-const Worst = struct { native: st.Err = .{}, triton: ?st.Err = null };
-
 const Rig = struct {
     gpu: Gpu,
     s: cuda.Stream,
@@ -27,7 +26,7 @@ const Rig = struct {
     checks: usize = 0,
     ties: usize = 0, // rows whose picks differ from the strict float64 ranking, each inside the logits' bounds
     controls: u8 = 0, // the negative controls already shown, a bit each
-    worst: [4]Worst = @splat(.{}), // by Out
+    worst: [4]rep.Out = undefined, // by Out, every case folded in, set once the shape is known
 
     fn up(r: *Rig, bytes: []const u8) !cuda.DeviceBuffer {
         return cuda.DeviceBuffer.fromHost(r.gpu.d, bytes);
@@ -54,10 +53,8 @@ const Rig = struct {
         return !seen;
     }
 
-    fn note(r: *Rig, which: Out, native: st.Err, triton: ?st.Err) void {
-        const w = &r.worst[@backingInt(which)];
-        w.native = st.worse(w.native, native);
-        if (triton) |t| w.triton = if (w.triton) |old| st.worse(old, t) else t;
+    fn note(r: *Rig, which: Out, c: *const st.Phased) void {
+        r.worst[@intFromEnum(which)].fold(c);
     }
 
     fn f64s(r: *Rig, a: std.mem.Allocator, b: cuda.DeviceBuffer, kind: st.Kind) ![]f64 {
@@ -133,7 +130,7 @@ fn rank(l: []const f64, t: []const f64, p: []const i32, top_k: usize) Rank {
 }
 
 // Picks and weights of `select` vs float64 logits `lref`; `lnat` is what select read, `native` counts near-ties.
-fn pickAndWeigh(r: *Rig, a: std.mem.Allocator, name: []const u8, lnat: []const f64, lref: []const f64, native: bool, picks: []const i32, wts: []const f64) !st.Err {
+fn pickAndWeigh(r: *Rig, a: std.mem.Allocator, name: []const u8, lnat: []const f64, lref: []const f64, native: bool, picks: []const i32, wts: []const f64) !rep.Run {
     const sh = r.sh;
     const ne = sh.experts + 1;
     const slots = sh.top_k + 1;
@@ -173,11 +170,9 @@ fn pickAndWeigh(r: *Rig, a: std.mem.Allocator, name: []const u8, lnat: []const f
         want[row * slots + sh.top_k] = sg;
         tol[row * slots + sh.top_k] = @max(sg - st.sigmoid(g - delta), st.sigmoid(g + delta) - sg) + weight_eps * st.sigmoid(g + delta) + 1e-30;
     }
-    const e = try st.measure(a, wts, want, tol, slots);
-    try st.ok(name, e);
-    if (r.first(0)) try st.reject(a, "router select weights", wts, want, tol, slots);
+    if (native and r.first(0)) try rep.control(a, "router select weights", wts, want, tol, slots);
     r.checks += 1;
-    return e;
+    return .{ .got = wts, .want = want, .tol = tol };
 }
 
 // The ranking check must refuse two picks swapped where the float64 logits are far apart.
@@ -208,7 +203,9 @@ fn select(r: *Rig, a: std.mem.Allocator, name: []const u8, ldev: cuda.DeviceBuff
     const slots = sh.top_k + 1;
     const m = lref.len / (sh.experts + 1);
     const lnat = try r.f64s(a, ldev, .f32);
-    var native: st.Err = undefined;
+    var label: [160]u8 = undefined;
+    var c = try st.Phased.init(a, tag(&label, name, "select weights"), slots);
+    var native: rep.Run = undefined;
     for ([_]bool{ false, true }) |triton| {
         if (triton and r.replay == null) break;
         var pb = try r.out(m * slots * 4);
@@ -219,17 +216,18 @@ fn select(r: *Rig, a: std.mem.Allocator, name: []const u8, ldev: cuda.DeviceBuff
         const praw = try r.read(a, pb);
         const picks = try a.alloc(i32, m * slots);
         for (picks, 0..) |*v, i| v.* = std.mem.bytesToValue(i32, praw[4 * i ..][0..4]);
-        var label: [160]u8 = undefined;
-        const e = try pickAndWeigh(r, a, tag(&label, name, if (triton) "triton weights" else "native weights"), lnat, lref, !triton, picks, try r.f64s(a, wb, .f32));
+        var who: [160]u8 = undefined;
+        const e = try pickAndWeigh(r, a, tag(&who, name, if (triton) "triton weights" else "native weights"), lnat, lref, !triton, picks, try r.f64s(a, wb, .f32));
         if (triton) {
-            try st.noWorse(tag(&label, name, "select weights"), native, e);
-            r.note(.weights, native, e);
+            try rep.feed(c.at(m), native, e);
         } else {
             native = e;
-            if (r.replay == null) r.note(.weights, e, null);
+            if (r.replay == null) try rep.feed(c.at(m), e, null);
             if (r.first(1)) try swapControl(r, "router picks", lnat, lref, picks);
         }
     }
+    try rep.show(&c);
+    r.note(.weights, &c);
 }
 
 // Logits of `x` rows against `w` router rows, then select on them: native and Triton against float64.
@@ -250,20 +248,20 @@ fn routerCase(r: *Rig, gpa: std.mem.Allocator, name: []const u8, x: []const u16,
     var ln = try r.out(m * ne * 4);
     defer ln.free();
     try r.native.logits(xb.ptr, wb.ptr, ln.ptr, m, sh);
-    const en = try st.measure(a, try r.f64s(a, ln, .f32), want, tol, ne);
-    var label: [160]u8 = undefined;
-    try st.ok(try std.fmt.bufPrint(&label, "{s} native logits [{d}, {d}] x [{d}]", .{ name, m, sh.d, ne }), en);
-    if (r.first(2)) try st.reject(a, "router logits", try r.f64s(a, ln, .f32), want, tol, ne);
-    if (r.replay == null) r.note(.logits, en, null);
+    const nat: rep.Run = .{ .got = try r.f64s(a, ln, .f32), .want = want, .tol = tol };
+    var tri: ?rep.Run = null;
     if (r.replay) |rp| {
         var lt = try r.out(m * ne * 4);
         defer lt.free();
         try rp.logits(xb.ptr, wb.ptr, lt.ptr, m, sh);
-        const et = try st.measure(a, try r.f64s(a, lt, .f32), want, tol, ne);
-        try st.ok(try std.fmt.bufPrint(&label, "{s} triton logits", .{name}), et);
-        try st.noWorse(tag(&label, name, "logits"), en, et);
-        r.note(.logits, en, et);
+        tri = .{ .got = try r.f64s(a, lt, .f32), .want = want, .tol = tol };
     }
+    var label: [160]u8 = undefined;
+    var c = try st.Phased.init(a, try std.fmt.bufPrint(&label, "{s} logits [{d}, {d}] x [{d}]", .{ name, m, sh.d, ne }), ne);
+    try rep.feed(c.at(m), nat, tri);
+    try rep.show(&c);
+    if (r.first(2)) try rep.control(a, "router logits", nat.got, want, tol, ne);
+    r.note(.logits, &c);
     r.checks += 1;
     try select(r, a, name, ln, want);
 }
@@ -308,26 +306,22 @@ fn combineCase(r: *Rig, gpa: std.mem.Allocator, name: []const u8, y: []const u8,
     defer yb.free();
     var wb = try r.up(std.mem.sliceAsBytes(w));
     defer wb.free();
-    var en: st.Err = undefined;
+    var nat: rep.Run = undefined;
+    var tri: ?rep.Run = null;
     for ([_]bool{ false, true }) |triton| {
         if (triton and r.replay == null) break;
         var ob = try r.out(m * sh.d * 2);
         defer ob.free();
         if (triton) try r.replay.?.combine(yb.ptr, y_bf16, wb.ptr, ob.ptr, m, sh) else try r.native.combine(yb.ptr, y_bf16, wb.ptr, ob.ptr, m, sh);
-        const got = try r.f64s(a, ob, .bf16);
-        const e = try st.measure(a, got, want, tol, sh.d);
-        var label: [160]u8 = undefined;
-        try st.ok(try std.fmt.bufPrint(&label, "{s} {s} combine {s} y, {d} rows", .{ name, if (triton) "triton" else "native", if (y_bf16) "bf16" else "fp32", m }), e);
-        const which: Out = if (y_bf16) .combine_bf16 else .combine_f32;
-        if (triton) {
-            try st.noWorse(tag(&label, name, "combine"), en, e);
-            r.note(which, en, e);
-        } else {
-            en = e;
-            if (r.replay == null) r.note(which, e, null);
-            if (r.first(if (y_bf16) 3 else 4)) try st.reject(a, "router combine", got, want, tol, sh.d);
-        }
+        const res: rep.Run = .{ .got = try r.f64s(a, ob, .bf16), .want = want, .tol = tol };
+        if (triton) tri = res else nat = res;
     }
+    var label: [160]u8 = undefined;
+    var c = try st.Phased.init(a, try std.fmt.bufPrint(&label, "{s} combine {s} y, {d} rows", .{ name, if (y_bf16) "bf16" else "fp32", m }), sh.d);
+    try rep.feed(c.at(m), nat, tri);
+    try rep.show(&c);
+    if (r.first(if (y_bf16) 3 else 4)) try rep.control(a, "router combine", nat.got, want, tol, sh.d);
+    r.note(if (y_bf16) .combine_bf16 else .combine_f32, &c);
     r.checks += 1;
 }
 
@@ -401,10 +395,10 @@ fn sweep(r: *Rig) !void {
     defer gpa.free(w);
     for (rounds, 0..) |m, round| {
         const scale = std.math.pow(f32, 4, @floatFromInt(@as(i32, @intCast(round % 6)) - 3));
-        for (w) |*v| v.* = st.bf16(rng.floatNorm(f32) * 0.03 * scale);
+        for (w) |*v| v.* = st.bf16Of(rng.floatNorm(f32) * 0.03 * scale);
         const x = try gpa.alloc(u16, m * sh.d);
         defer gpa.free(x);
-        for (x) |*v| v.* = st.bf16(rng.floatNorm(f32) * (if (rng.uintLessThan(u8, 10) == 0) @as(f32, 8) else 1));
+        for (x) |*v| v.* = st.bf16Of(rng.floatNorm(f32) * (if (rng.uintLessThan(u8, 10) == 0) @as(f32, 8) else 1));
         var name: [48]u8 = undefined;
         const label = try std.fmt.bufPrint(&name, "sweep {d} rows {d}", .{ round, m });
         try routerCase(r, gpa, label, x, w);
@@ -438,15 +432,26 @@ fn sweep(r: *Rig) !void {
         for (y) |*v| v.* = rng.floatNorm(f32) * 3;
         const yh = try gpa.alloc(u16, y.len);
         defer gpa.free(yh);
-        for (yh, y) |*o, v| o.* = st.bf16(v);
+        for (yh, y) |*o, v| o.* = st.bf16Of(v);
         try combineCase(r, gpa, label, std.mem.sliceAsBytes(y), false, wts);
         try combineCase(r, gpa, label, std.mem.sliceAsBytes(yh), true, wts);
     }
 }
 
+fn outs(a: std.mem.Allocator, sh: router.Shape) ![4]rep.Out {
+    return .{
+        try rep.Out.init(a, "router logits", "2^-16 sum |x w|", sh.experts + 1),
+        try rep.Out.init(a, "select weights (cols 0-7 routed, 8 shared)", "2^-8 w + 2 w dl", sh.top_k + 1),
+        try rep.Out.init(a, "combine fp32 y", "2^-8 |y| + 2^-20 sum |w y|", sh.d),
+        try rep.Out.init(a, "combine bf16 y", "2^-8 |y| + 2^-20 sum |w y|", sh.d),
+    };
+}
+
 /// `aot_dir` "native": the built-in kernels alone, no Triton comparison; `dir`: qwen35/capture_router.py's fixtures.
 pub fn run(gpu: Gpu, aot_dir: []const u8, dir: ?[]const u8) !void {
     const gpa = gpu.gpa;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
     var set: ?cuda.aot.Set = if (std.mem.eql(u8, aot_dir, "native")) null else try cuda.aot.Set.load(gpa, gpu.io, gpu.d, gpu.ctx.device, aot_dir);
     defer if (set) |*s| s.deinit();
     const s = try cuda.Stream.init(gpu.d, true);
@@ -462,10 +467,10 @@ pub fn run(gpu: Gpu, aot_dir: []const u8, dir: ?[]const u8) !void {
         defer parsed.deinit();
         const top = parsed.value.object;
         r.sh = .{ .d = @intCast(top.get("d").?.integer), .experts = @intCast(top.get("experts").?.integer), .top_k = @intCast(top.get("top_k").?.integer) };
+        r.worst = try outs(arena.allocator(), r.sh);
         try fixtures(&r, d, top);
-    }
+    } else r.worst = try outs(arena.allocator(), r.sh);
     try sweep(&r);
-    const bounds = [_][]const u8{ "2^-16 sum |x w|", "2^-8 w + 2 w dl", "2^-8 |y| + 2^-20 sum |w y|", "2^-8 |y| + 2^-20 sum |w y|" };
-    for (r.worst, [_][]const u8{ "router logits", "select weights (cols 0-7 routed, 8 shared)", "combine fp32 y", "combine bf16 y" }, bounds) |w, name, bound| st.table(name, w.native, w.triton, bound);
+    for (&r.worst) |*w| w.table();
     check.pass("qwen-router-f64: {d} outputs within their float64 bounds{s}, {d} rows inside a near-tie", .{ r.checks, if (r.replay != null) ", native no worse than Triton" else "", r.ties });
 }

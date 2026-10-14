@@ -3,7 +3,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const qr = @import("quant_ref_tests.zig");
-const st = @import("moe_f64_stats.zig");
+const st = @import("qwen_f64.zig");
+const rep = @import("qwen_moe_f64_report.zig");
 
 const grouped = cuda.grouped;
 const experts = cuda.experts;
@@ -32,8 +33,8 @@ fn mat(r: *Rig, n: usize, k: usize) !Mat {
     const biases = try r.a.alloc(u16, scales.len);
     for (scales, biases) |*sc, *bi| {
         const s = 0.004 + r.rng.float(f32) * 0.02;
-        sc.* = st.bf16(s);
-        bi.* = st.bf16(-s * (4 + r.rng.float(f32) * 8));
+        sc.* = st.bf16Of(s);
+        bi.* = st.bf16Of(-s * (4 + r.rng.float(f32) * 8));
     }
     return .{ .words = words, .scales = scales, .biases = biases, .n = n, .k = k };
 }
@@ -99,14 +100,17 @@ fn picks(r: *Rig, rows: usize, hot: bool) ![]i32 {
     return out;
 }
 
-const Worst = struct { name: []const u8, err: st.Err = .{}, bound: []const u8 };
-
 const Stack = struct { gate: Mat, up: Mat, down: Mat };
 
-// The kernels' answers (activations bf16, y fp32 or bf16) and the float64 reference of both, one batch.
-fn batch(r: *Rig, l: experts.Layer, g: experts.Grouped, router: grouped.Router, s: Stack, x: []const u16, rows: usize, prompt: bool, hot: bool, tab: *[4]Worst) !void {
+const Kit = struct { l: experts.Layer, g: experts.Grouped, router: grouped.Router, s: Stack };
+
+// The kernels' answers (activations bf16, y fp32 or bf16) and the float64 reference of both, one batch of `pk`'s picks.
+fn batch(r: *Rig, k: Kit, x: []const u16, rows: usize, prompt: bool, pk: []const i32, note: []const u8, outs: *[2]rep.Out) !void {
+    const l = k.l;
+    const g = k.g;
+    const router = k.router;
+    const s = k.s;
     const pairs = rows * slots;
-    const pk = try picks(r, rows, hot);
     const tile = if (prompt) experts.promptTile(l.format) else 16;
     const wide = pairs > grouped.small;
     const p: grouped.Plan = .{
@@ -182,19 +186,30 @@ fn batch(r: *Rig, l: experts.Layer, g: experts.Grouped, router: grouped.Router, 
         }
     }
     var name: [128]u8 = undefined;
-    const label = try std.fmt.bufPrint(&name, "experts {s} {d} rows{s}", .{ if (prompt) "prompt" else "decode", rows, if (hot) ", one hot set" else "" });
-    var full: [160]u8 = undefined;
-    const ea = try st.measure(r.a, try st.decode(r.a, got_act, .bf16, pairs * NI), want_a, tol_a, NI);
-    try st.ok(try std.fmt.bufPrint(&full, "{s} gate-up (SwiGLU)", .{label}), ea);
-    const ey = try st.measure(r.a, try st.decode(r.a, got_y, if (prompt) .bf16 else .f32, pairs * D), want_y, tol_y, D);
-    try st.ok(try std.fmt.bufPrint(&full, "{s} down", .{label}), ey);
-    const idx: usize = if (prompt) 2 else 0;
-    tab[idx].err = st.worse(tab[idx].err, ea);
-    tab[idx + 1].err = st.worse(tab[idx + 1].err, ey);
+    const a_d = try st.decode(r.a, got_act, .bf16, pairs * NI);
+    const y_d = try st.decode(r.a, got_y, if (prompt) .bf16 else .f32, pairs * D);
+    var ca = try st.Phased.init(r.a, try std.fmt.bufPrint(&name, "experts gate-up (SwiGLU) {d} rows{s}", .{ rows, note }), NI);
+    try rep.feed(ca.at(rows), .{ .got = a_d, .want = want_a, .tol = tol_a }, null);
+    try rep.show(&ca);
+    outs[0].fold(&ca);
+    var cy = try st.Phased.init(r.a, try std.fmt.bufPrint(&name, "experts down {d} rows{s}", .{ rows, note }), D);
+    try rep.feed(cy.at(rows), .{ .got = y_d, .want = want_y, .tol = tol_y }, null);
+    try rep.show(&cy);
+    outs[1].fold(&cy);
     if (rows == 1 and !prompt) {
-        try st.reject(r.a, "experts gate-up", try st.decode(r.a, got_act, .bf16, pairs * NI), want_a, tol_a, NI);
-        try st.reject(r.a, "experts down", try st.decode(r.a, got_y, .f32, pairs * D), want_y, tol_y, D);
+        try rep.control(r.a, "experts gate-up", a_d, want_a, tol_a, NI);
+        try rep.control(r.a, "experts down", y_d, want_y, tol_y, D);
     }
+}
+
+// A prompt batch, then its first decode_rows rows (the same inputs and picks) through the decode kernel.
+fn shared(r: *Rig, k: Kit, x: []const u16, rows: usize, hot: bool, outs: *[2]rep.Out) !void {
+    const pk = try picks(r, rows, hot);
+    var note: [64]u8 = undefined;
+    const hot_note = if (hot) ", one hot set" else "";
+    try batch(r, k, x, rows, true, pk, hot_note, outs);
+    const same = try std.fmt.bufPrint(&note, ", the first {d} of {d} prompt rows{s}", .{ st.decode_rows, rows, hot_note });
+    try batch(r, k, x, st.decode_rows, false, pk[0 .. st.decode_rows * slots], same, outs);
 }
 
 pub fn run(gpu: check.Gpu) !void {
@@ -223,18 +238,17 @@ pub fn run(gpu: check.Gpu) !void {
     try ex.pack(stream, dd.words, dd.scales, dd.biases, down, E, D, NI);
     const l: experts.Layer = .{ .format = .affine4, .swiglu = true, .up = up, .down = down, .width = NI, .dims = D, .experts = E };
     const g: experts.Grouped = .{ .affine4 = &ex };
+    const k: Kit = .{ .l = l, .g = g, .router = router, .s = s };
     // normed hidden rows: unit normal, a channel in 256 six times wider
     const x = try r.a.alloc(u16, 128 * D);
-    for (x, 0..) |*v, i| v.* = st.bf16(r.rng.floatNorm(f32) * (if (i % 256 == 7) @as(f32, 6) else 1));
-    var tab = [4]Worst{
-        .{ .name = "experts decode gate-up (SwiGLU act, bf16)", .bound = "bf16 roundings of gate, up, silu, product + fp32 sums" },
-        .{ .name = "experts decode down (fp32 pair rows)", .bound = "(512/16+16) 2^-23 sum |a w|" },
-        .{ .name = "experts prompt gate-up (SwiGLU act, bf16)", .bound = "as decode, weights rounded to bf16" },
-        .{ .name = "experts prompt down (bf16 pair rows)", .bound = "2^-8 |y| + (512/16+16) 2^-23 sum |a w|" },
+    for (x, 0..) |*v, i| v.* = st.bf16Of(r.rng.floatNorm(f32) * (if (i % 256 == 7) @as(f32, 6) else 1));
+    var outs = [2]rep.Out{
+        try rep.Out.init(r.a, "experts gate-up (SwiGLU act, bf16)", "bf16 roundings of gate, up, silu, product + fp32 sums; prompt: weights rounded to bf16", NI),
+        try rep.Out.init(r.a, "experts down (fp32 pair rows, bf16 in prompt)", "(512/16+16) 2^-23 sum |a w|; prompt adds 2^-8 |y|", D),
     };
-    for ([_]usize{ 1, 4, 16 }) |rows| try batch(&r, l, g, router, s, x, rows, false, false, &tab);
-    try batch(&r, l, g, router, s, x, 96, true, false, &tab);
-    try batch(&r, l, g, router, s, x, 128, true, true, &tab);
-    for (tab) |w| st.table(w.name, w.err, null, w.bound);
+    for ([_]usize{ 1, 4, 16 }) |rows| try batch(&r, k, x, rows, false, try picks(&r, rows, false), "", &outs);
+    try shared(&r, k, x, 96, false, &outs);
+    try shared(&r, k, x, 128, true, &outs);
+    for (&outs) |*o| o.table();
     check.pass("qwen-experts-f64: shared + {d} routed experts, [{d}, {d}] -> [{d}], gate-up and down within their float64 bounds", .{ E - 1, NI, D, D });
 }

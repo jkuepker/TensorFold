@@ -3,7 +3,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const qwen27 = @import("qwen27");
 const check = @import("check.zig");
-const st = @import("moe_f64_stats.zig");
+const st = @import("qwen_f64.zig");
+const rep = @import("qwen_moe_f64_report.zig");
 
 const kern = qwen27.kernels;
 const Gpu = check.Gpu;
@@ -32,7 +33,7 @@ const Proj = struct {
     pro: Ref = undefined,
 };
 
-const Class = struct { name: []const u8, dec: st.Err = .{}, pro: st.Err = .{} };
+const Class = struct { name: []const u8, out: rep.Out };
 
 const Rig = struct {
     gpu: Gpu,
@@ -65,8 +66,8 @@ fn make(r: *Rig, a: std.mem.Allocator, name: []const u8, n: usize, k: usize) !Pr
     const biases = try a.alloc(u16, scales.len);
     for (scales, biases) |*sc, *bi| {
         const s = 0.004 + r.rng.float(f32) * 0.02;
-        sc.* = st.bf16(s);
-        bi.* = st.bf16(-s * (4 + r.rng.float(f32) * 8));
+        sc.* = st.bf16Of(s);
+        bi.* = st.bf16Of(-s * (4 + r.rng.float(f32) * 8));
     }
     const kg = k / 64;
     const sizes = cuda.qlinear.Affine4.layout(n, k);
@@ -138,7 +139,7 @@ fn reference(a: std.mem.Allocator, p: Proj, xf: []const f64, xa: []const f64, ro
 // bf16 rows of a normed hidden state: unit normal, a channel in 256 six times wider.
 fn inputs(r: *Rig, a: std.mem.Allocator, rows: usize, k: usize) !struct { x: []u16, xf: []f64, xa: []f64, xs: []f32 } {
     const x = try a.alloc(u16, rows * k);
-    for (x, 0..) |*v, i| v.* = st.bf16(r.rng.floatNorm(f32) * (if (i % 256 == 7) @as(f32, 6) else 1));
+    for (x, 0..) |*v, i| v.* = st.bf16Of(r.rng.floatNorm(f32) * (if (i % 256 == 7) @as(f32, 6) else 1));
     const xf = try a.alloc(f64, x.len);
     const xa = try a.alloc(f64, x.len);
     for (xf, xa, x) |*o, *oa, v| {
@@ -154,19 +155,26 @@ fn inputs(r: *Rig, a: std.mem.Allocator, rows: usize, k: usize) !struct { x: []u
     return .{ .x = x, .xf = xf, .xa = xa, .xs = xs };
 }
 
-fn compare(r: *Rig, a: std.mem.Allocator, label: []const u8, buf: cuda.DeviceBuffer, p: Proj, ref: Ref, rows: usize) !st.Err {
+// One kernel call's output against the reference: its RESULT line, then folded into its class by the call's rows.
+fn compare(r: *Rig, a: std.mem.Allocator, label: []const u8, buf: cuda.DeviceBuffer, p: Proj, ref: Ref, rows: usize, c: *Class) !void {
     try r.s.synchronize();
     const raw = try a.alloc(u8, buf.len);
     try buf.download(0, raw);
-    const got = try st.decode(a, raw, .bf16, rows * p.n);
-    const e = try st.measure(a, got, ref.want[0 .. rows * p.n], ref.tol[0 .. rows * p.n], p.n);
+    const res: rep.Run = .{ .got = try st.decode(a, raw, .bf16, rows * p.n), .want = ref.want[0 .. rows * p.n], .tol = ref.tol[0 .. rows * p.n] };
     var name: [160]u8 = undefined;
-    try st.ok(try std.fmt.bufPrint(&name, "{s} {s} [{d}, {d}] {d} rows", .{ label, p.name, p.n, p.k, rows }), e);
+    var cs = try st.Phased.init(r.gpu.gpa, try std.fmt.bufPrint(&name, "{s} {s} [{d}, {d}] {d} rows", .{ label, p.name, p.n, p.k, rows }), p.n);
+    defer cs.deinit();
+    try rep.feed(cs.at(rows), res, null);
+    try rep.show(&cs);
+    c.out.fold(&cs);
     if (!r.controlled) {
         r.controlled = true;
-        try st.reject(a, "qmm decode", got, ref.want[0 .. rows * p.n], ref.tol[0 .. rows * p.n], p.n);
+        try rep.control(a, "qmm decode", res.got, res.want, res.tol, p.n);
     }
-    return e;
+}
+
+fn class(gpa: std.mem.Allocator, name: []const u8, cols: usize, bound: []const u8) !Class {
+    return .{ .name = name, .out = try rep.Out.init(gpa, name, bound, cols) };
 }
 
 fn find(classes: []Class, name: []const u8) *Class {
@@ -184,6 +192,7 @@ fn set(r: *Rig, a: std.mem.Allocator, parts: []Proj, classes: []Class, group: bo
         p.dec = try reference(a, p.*, inp.xf, inp.xa, most, false);
         p.pro = try reference(a, p.*, inp.xf, inp.xa, top, true);
     }
+    // every call below reads a prefix of these rows: the first 16 meet dense, denseGroup and prefillDense alike
     const x = try r.dev(std.mem.sliceAsBytes(inp.x));
     const xs = try r.dev(std.mem.sliceAsBytes(inp.xs));
     for (decode_rows) |rows| {
@@ -199,8 +208,8 @@ fn set(r: *Rig, a: std.mem.Allocator, parts: []Proj, classes: []Class, group: bo
         if (group) try r.ops.denseGroup(x.ptr, xs.ptr, items[0..parts.len], rows);
         for (parts, 0..) |p, i| {
             const c = find(classes, p.name);
-            c.dec = st.worse(c.dec, try compare(r, a, "qmm dense decode", alone[i], p, p.dec, rows));
-            if (group) c.dec = st.worse(c.dec, try compare(r, a, "qmm denseGroup decode", fused[i], p, p.dec, rows));
+            try compare(r, a, "qmm dense", alone[i], p, p.dec, rows, c);
+            if (group) try compare(r, a, "qmm denseGroup", fused[i], p, p.dec, rows, c);
         }
     }
     for (prompt_rows) |rows| {
@@ -208,7 +217,7 @@ fn set(r: *Rig, a: std.mem.Allocator, parts: []Proj, classes: []Class, group: bo
             const out = try r.zeros(rows * p.n * 2);
             try r.ops.prefillDense(x.ptr, p.q, out.ptr, rows);
             const c = find(classes, p.name);
-            c.pro = st.worse(c.pro, try compare(r, a, "qmm prefillDense prompt", out, p, p.pro, rows));
+            try compare(r, a, "qmm prefillDense", out, p, p.pro, rows, c);
         }
     }
 }
@@ -224,7 +233,7 @@ fn head(r: *Rig, a: std.mem.Allocator, p: *Proj, classes: []Class) !void {
         const out = try r.zeros(m * p.n * 2);
         try r.ops.dense(x.ptr, xs.ptr, p.q, out.ptr, m);
         const c = find(classes, p.name);
-        c.dec = st.worse(c.dec, try compare(r, a, "qmm dense decode", out, p.*, ref, m));
+        try compare(r, a, "qmm dense", out, p.*, ref, m, c);
     }
 }
 
@@ -243,11 +252,15 @@ pub fn run(gpu: Gpu, kernels: []const u8) !void {
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);
     }
+    const bound = "2^-8 |y| + (k/16+16) 2^-23 sum |x| (|q s| + |b|); prompt (prefillDense): bf16-rounded weights";
     var classes = [_]Class{
-        .{ .name = "gdn qkv" }, .{ .name = "gdn z" },  .{ .name = "gdn b" },  .{ .name = "gdn a" },
-        .{ .name = "attn q" },  .{ .name = "attn k" }, .{ .name = "attn v" }, .{ .name = "o_proj / out_proj" },
-        .{ .name = "lm_head" },
+        try class(gpu.gpa, "gdn qkv", 8192, bound), try class(gpu.gpa, "gdn z", 4096, bound),
+        try class(gpu.gpa, "gdn b", 32, bound),     try class(gpu.gpa, "gdn a", 32, bound),
+        try class(gpu.gpa, "attn q", 8192, bound),  try class(gpu.gpa, "attn k", 512, bound),
+        try class(gpu.gpa, "attn v", 512, bound),   try class(gpu.gpa, "o_proj / out_proj", hidden, bound),
+        try class(gpu.gpa, "lm_head", vocab, bound),
     };
+    defer for (&classes) |*c| c.out.deinit();
     var gdn = [_]Proj{ try make(&r, a, "gdn qkv", 8192, hidden), try make(&r, a, "gdn z", 4096, hidden), try make(&r, a, "gdn b", 32, hidden), try make(&r, a, "gdn a", 32, hidden) };
     try set(&r, a, &gdn, &classes, true);
     var attn = [_]Proj{ try make(&r, a, "attn q", 8192, hidden), try make(&r, a, "attn k", 512, hidden), try make(&r, a, "attn v", 512, hidden) };
@@ -256,10 +269,6 @@ pub fn run(gpu: Gpu, kernels: []const u8) !void {
     try set(&r, a, &out, &classes, false);
     var lm = try make(&r, a, "lm_head", vocab, hidden);
     try head(&r, a, &lm, &classes);
-    for (classes) |c| {
-        var name: [64]u8 = undefined;
-        st.table(try std.fmt.bufPrint(&name, "{s} decode", .{c.name}), c.dec, null, "2^-8 |y| + (k/16+16) 2^-23 sum |x| (|q s| + |b|)");
-        if (c.pro.count > 0) st.table(try std.fmt.bufPrint(&name, "{s} prompt", .{c.name}), c.pro, null, "as decode, bf16-rounded weights");
-    }
-    check.pass("qwen-proj-f64: {d} projection classes, decode (dense, denseGroup) and prompt (prefillDense) within their float64 bounds", .{classes.len});
+    for (&classes) |*c| c.out.table();
+    check.pass("qwen-proj-f64: {d} projection classes, decode (rows 1-16) and prompt (rows > 16) within their float64 bounds", .{classes.len});
 }
