@@ -128,6 +128,32 @@ captured cubins, on GB10 and for the shapes in `prep_native.zig` (`gdnFits`, `at
 1 to 4096 (saturating sigmoid and softplus inputs, positions up to 2^30 for the sin and cos argument reduction), whole outputs and guard
 bytes byte for byte. `qwen36-layers`, `qwen36-mtp` and the serve checks must pass on a kernel set with those entries removed from `aot.json`.
 
+## Float64 references
+
+The byte-equality tests above show the native kernels equal the Python engine's; these show how far both sit from the exact answer.
+Each reference is computed in float64 on the host from the same input bytes (bf16 and fp32 decoded exactly, nothing taken from a
+native or Triton output), element by element, with a per-element bound built from the rounding points the format forces and the
+condition of the sum. A column's worst absolute error, worst relative error and worst error over its bound are kept over every
+element of that column, and printed as one `F64 <output> ...` line. The relative error is over the larger of the reference and one
+bf16 ulp of the vector's largest value (prep, attention) or of the row norm (GDN), so a cancelling element does not read as 100%.
+
+- `tf-cuda-test qwen-prep-f64 [kernel set]`: `gdn_pre` (q, k, v, g, beta) and `attn_prep` (q, k, rotary) over serving magnitudes
+  and heavy tails, bound asserted; with a kernel set, every captured entry also runs on the same inputs, the bound-free extremes of
+  `qwen-prep` are compared, and native must be no further from float64 than Triton in every column. Positions past 262143 are a
+  separate `_stress` output: the fp32 angle `pos * inv` rounds there, so its bound is the angle's own and is loose by design.
+- `tf-cuda-test qwen-attention-f64 [kernel set] [rounds]`: the attention output, and every partial slot's `PO / PL` and `PM + ln PL`
+  (the quantities that do not depend on the kernel's own running maximum), against a float64 softmax attention over the stream's
+  committed keys and the row's root path, the mask built from the window's parents; plans come from `round.stage`. Slots past a row's
+  last key must hold `l = 0`, `m = -inf`.
+- `tf-cuda-test qwen-gdn-f64`: the tree kernel's chain (decode) and every schedule-slot class, one and several streams, the prompt
+  chain kernel's output and final state, and the in-place replay of accepted rows, against a float64 gated delta rule. The same rows
+  go through the prompt and the decode chain and are reported separately. A step's fp32 error is bounded by 32 units of 2^-24 of the
+  state row norm, decayed by `g` down the path, and reaches `y` through `|q|`.
+
+None of the three needs a captured set (`qwen-prep-f64` and `qwen-attention-f64` take one to add the Triton columns; `qwen-gdn-f64` has no
+Triton counterpart). Negative controls: `TF_QWEN_F64_PERTURB=<column>` moves that column's native elements 1.25 bounds off the
+reference (each command must then fail), and `TF_QWEN_PREP_FATBIN` runs `qwen-prep-f64` on another build of `qwen_prep.cu`.
+
 ## Programmatic dependent launch
 
 Each plain launch on the stream leaves the GPU about 2 us idle before the next kernel starts; a kernel launched with

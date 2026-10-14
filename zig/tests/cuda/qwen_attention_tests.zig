@@ -12,39 +12,39 @@ const tri = qwen27.triton;
 const native = qwen27.tree_native;
 const round = qwen27.round;
 
-const Tri = tri.Tri;
-const H = 16;
-const HK = 2;
-const D = 256;
-const kv_row = HK * D; // elements a cached position holds
-const capacity = 8192 + 256;
+pub const Tri = tri.Tri;
+pub const H = 16;
+pub const HK = 2;
+pub const D = 256;
+pub const kv_row = HK * D; // elements a cached position holds
+pub const capacity = 8192 + 256;
 const nan_words: u32 = 0x7fc17fc1; // two bf16 NaNs
-const geometry: qwen27.config.Geometry = .{ .hidden = 2048, .intermediate = 0, .layers = 4, .linear_k_heads = 16, .linear_v_heads = 32, .query_heads = H, .kv_heads = HK, .vocab = 4096 };
-const attn: tri.Attn = .{ .heads = H, .kv_heads = HK, .dim = D, .half = 32 };
-const committed = [_]usize{ 0, 1, 511, 512, 513, 1023, 1024, 2047, 2048, 2049, 4095, 4096, 6143, 6144, 8191 };
-const widths = [_]usize{ 1, 2, 3, 4, 8, 16, 17, 32, 44, 64, 128 };
-const lane_widths = [_]usize{ 1, 2, 3, 4, 8, 16 };
-const zero_tokens: [128]u32 = @splat(0);
+pub const geometry: qwen27.config.Geometry = .{ .hidden = 2048, .intermediate = 0, .layers = 4, .linear_k_heads = 16, .linear_v_heads = 32, .query_heads = H, .kv_heads = HK, .vocab = 4096 };
+pub const attn: tri.Attn = .{ .heads = H, .kv_heads = HK, .dim = D, .half = 32 };
+pub const committed = [_]usize{ 0, 1, 511, 512, 513, 1023, 1024, 2047, 2048, 2049, 4095, 4096, 6143, 6144, 8191 };
+pub const widths = [_]usize{ 1, 2, 3, 4, 8, 16, 17, 32, 44, 64, 128 };
+pub const lane_widths = [_]usize{ 1, 2, 3, 4, 8, 16 };
+pub const zero_tokens: [128]u32 = @splat(0);
 
-const Kind = enum { chain, bushy };
-const Spec = struct { p: usize, w: usize, kind: Kind = .chain, k: u8 = 0, v: u8 = 0 }; // k, v: the caches start 8 elements times these past the stream's first rows
+pub const Kind = enum { chain, bushy };
+pub const Spec = struct { p: usize, w: usize, kind: Kind = .chain, k: u8 = 0, v: u8 = 0 }; // k, v: the caches start 8 elements times these past the stream's first rows
 
-fn bf16(v: f32) u16 {
+pub fn bf16(v: f32) u16 {
     const u: u32 = @bitCast(v);
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
-const Buffers = struct {
+pub const Buffers = struct {
     o: cuda.DeviceBuffer,
     m: cuda.DeviceBuffer,
     l: cuda.DeviceBuffer,
 
-    fn parts(b: Buffers) tri.Tri.Partials {
+    pub fn parts(b: Buffers) tri.Tri.Partials {
         return .{ .o = b.o.ptr, .m = b.m.ptr, .l = b.l.ptr };
     }
 };
 
-const Rig = struct {
+pub const Rig = struct {
     gpu: check.Gpu,
     s: cuda.Stream,
     k: *kern.Kernels,
@@ -67,15 +67,20 @@ const Rig = struct {
     skipped: usize = 0,
     written: usize = 0, // words the replay wrote (not the 0xff fill), over all comparisons
 
-    fn ops(r: *Rig) kern.Ops {
+    pub fn ops(r: *Rig) kern.Ops {
         return .{ .k = r.k, .s = r.s };
     }
 
-    fn replay(r: *Rig) Tri {
+    pub fn replay(r: *Rig) Tri {
         return .{ .set = &r.k.triton.?, .s = r.s };
     }
 
-    fn fresh(r: *Rig, n: usize, heavy: bool, scale: f32) !cuda.DeviceBuffer {
+    // The Tri that stages a round: Triton's launches where a set is loaded, else the built-in row glue alone.
+    pub fn staging(r: *Rig) Tri {
+        return if (r.k.triton) |*t| .{ .set = t, .s = r.s } else .{ .set = null, .s = r.s, .glue = if (r.k.glue) |*g| g else null };
+    }
+
+    pub fn fresh(r: *Rig, n: usize, heavy: bool, scale: f32) !cuda.DeviceBuffer {
         const rng = r.prng.random();
         const host = try r.gpu.gpa.alloc(u16, n);
         defer r.gpu.gpa.free(host);
@@ -88,14 +93,14 @@ const Rig = struct {
     }
 
     // Fills the 0xff pattern a kernel must leave in every slot it does not write.
-    fn clear(r: *Rig, b: Buffers) !void {
+    pub fn clear(r: *Rig, b: Buffers) !void {
         try b.o.fill8(0xff, r.s.handle);
         try b.m.fill8(0xff, r.s.handle);
         try b.l.fill8(0xff, r.s.handle);
     }
 
     // Each stream's caches (OFF a multiple of 8 elements): pristine rows below its committed length, NaN words above.
-    fn load(r: *Rig, specs: []const Spec, pool: usize) !void {
+    pub fn load(r: *Rig, specs: []const Spec, pool: usize) !void {
         const o = r.ops();
         for (specs, 0..) |sp, i| {
             const seq = &r.seqs[i];
@@ -111,7 +116,7 @@ const Rig = struct {
     }
 
     // The same bytes in the compared prefix of both buffers, else the first differences.
-    fn same(r: *Rig, what: []const u8, name: []const u8, a: cuda.DeviceBuffer, b: cuda.DeviceBuffer, bytes: usize) !void {
+    pub fn same(r: *Rig, what: []const u8, name: []const u8, a: cuda.DeviceBuffer, b: cuda.DeviceBuffer, bytes: usize) !void {
         try r.s.synchronize();
         const gpa = r.gpu.gpa;
         const x = try gpa.alloc(u8, bytes);
@@ -139,7 +144,7 @@ const Rig = struct {
         }
     }
 
-    fn partials(r: *Rig, name: []const u8, slots: usize, rows: usize) !void {
+    pub fn partials(r: *Rig, name: []const u8, slots: usize, rows: usize) !void {
         const unit = slots * rows * H;
         const guard = 4096; // bytes past the prefix: a stray write shows
         try r.same("PO", name, r.part[0].o, r.part[1].o, @min(unit * D * 4 + guard, r.part[0].o.len));
@@ -149,16 +154,16 @@ const Rig = struct {
 };
 
 // Parents of a window (one root, as the engine builds them): a chain, or a random tree of short branches.
-fn parentsOf(rng: std.Random, kind: Kind, out: []i32) void {
+pub fn parentsOf(rng: std.Random, kind: Kind, out: []i32) void {
     for (out, 0..) |*x, i| x.* = switch (kind) {
         .chain => @as(i32, @intCast(i)) - 1,
         .bushy => if (i == 0) -1 else if (rng.uintLessThan(u8, 10) < 7) @as(i32, @intCast(i)) - 1 else @intCast(i - 1 - rng.uintLessThan(usize, @min(i, 8))),
     };
 }
 
-const Staged = struct { r: round.Round, rows: usize, slots: usize };
+pub const Staged = struct { r: round.Round, rows: usize, slots: usize };
 
-fn stage(rig: *Rig, specs: []const Spec, par: *[16][128]i32) !Staged {
+pub fn stage(rig: *Rig, specs: []const Spec, par: *[16][128]i32) !Staged {
     var parts: [16]round.Part = undefined;
     var slots: usize = 0;
     var rows: usize = 0;
@@ -168,11 +173,11 @@ fn stage(rig: *Rig, specs: []const Spec, par: *[16][128]i32) !Staged {
         slots = @max(slots, tri.slots(sp.p, sp.w));
         rows += sp.w;
     }
-    const r = try round.stage(rig.gpu.gpa, rig.ops(), rig.replay(), rig.scratch, geometry, parts[0..specs.len]);
+    const r = try round.stage(rig.gpu.gpa, rig.ops(), rig.staging(), rig.scratch, geometry, parts[0..specs.len]);
     return .{ .r = r, .rows = rows, .slots = slots };
 }
 
-fn inputs(rig: *Rig, heavy: bool) !void {
+pub fn inputs(rig: *Rig, heavy: bool) !void {
     for ([_]*cuda.DeviceBuffer{ &rig.q, &rig.kn, &rig.vn }, 0..) |b, i| {
         b.free();
         const heads: usize = if (i == 0) H else HK;
@@ -180,7 +185,7 @@ fn inputs(rig: *Rig, heavy: bool) !void {
     }
 }
 
-fn label(buf: []u8, specs: []const Spec, pool: usize) []const u8 {
+pub fn label(buf: []u8, specs: []const Spec, pool: usize) []const u8 {
     var w = std.Io.Writer.fixed(buf);
     w.print("pool {d}:", .{pool}) catch {};
     for (specs[0..@min(specs.len, 4)]) |sp| w.print(" p{d}w{d}{s}", .{ sp.p, sp.w, @tagName(sp.kind)[0..1] }) catch {};
@@ -365,63 +370,90 @@ fn timing(rig: *Rig, specs: []const Spec) !void {
     std.debug.print("  p {d:>5} rows {d:>3}: replay {d:>7.1} us, native {d:>7.1} us\n", .{ specs[0].p, specs[0].w, us[0], us[1] });
 }
 
-pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
-    const gpa = gpu.gpa;
-    var stream = try cuda.Stream.init(gpu.d, true);
-    defer stream.deinit();
-    var k = try kern.Kernels.load(gpa, gpu.io, gpu.ctx, kernels, geometry.linear_v_heads);
-    defer k.deinit();
-    var scratch = try st.Scratch.init(gpa, gpu.d, geometry, 256, capacity);
-    defer scratch.deinit();
-    const o: kern.Ops = .{ .k = &k, .s = stream };
-    const seqs = try gpa.alloc(st.Seq, st.max_streams);
-    var made: usize = 0;
-    defer {
-        for (seqs[0..made]) |*sq| sq.deinit();
-        gpa.free(seqs);
-    }
-    for (seqs) |*sq| {
-        sq.* = try st.Seq.init(gpa, o, geometry, capacity);
-        made += 1;
-    }
-    const part_elems = scratch.part_chunks * st.round_rows * H;
-    var rig: Rig = .{
-        .gpu = gpu,
-        .s = stream,
-        .k = &k,
-        .scratch = &scratch,
-        .seqs = seqs,
-        .home = undefined,
-        .pool = undefined,
-        .q = try cuda.DeviceBuffer.alloc(gpu.d, 16),
-        .kn = try cuda.DeviceBuffer.alloc(gpu.d, 16),
-        .vn = try cuda.DeviceBuffer.alloc(gpu.d, 16),
-        .out = .{ try cuda.DeviceBuffer.alloc(gpu.d, st.round_rows * H * D * 2), try cuda.DeviceBuffer.alloc(gpu.d, st.round_rows * H * D * 2) },
-        .part = undefined,
-        .nat = try native.Native.load(gpu.d, try gpu.ctx.capability()),
-        .prng = std.Random.DefaultPrng.init(0x7ee_a77e),
-        .covered = try gpa.alloc(bool, k.triton.?.variants.len),
-    };
-    @memset(rig.covered, false);
-    for (seqs, &rig.home) |sq, *h| h.* = .{ sq.keys[3], sq.values[3] };
-    defer gpa.free(rig.covered);
-    defer rig.nat.deinit();
-    for (&rig.part) |*b| b.* = .{ .o = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * D * 4), .m = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4), .l = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4) };
-    for (&rig.pool, 0..) |*pr, i| for (pr) |*b| {
-        b.* = try rig.fresh(capacity * kv_row + 16 * 4096, i == 1, 1.0);
-    };
-    try stream.synchronize();
+/// The engine objects a test rig stands on: stream, kernels (Triton set optional), scratch, streams' caches, the rig.
+pub const Env = struct {
+    gpa: std.mem.Allocator,
+    stream: cuda.Stream,
+    k: kern.Kernels,
+    scratch: st.Scratch,
+    seqs: []st.Seq,
+    made: usize,
+    rig: Rig,
 
-    grid(&rig);
+    pub fn init(env: *Env, gpu: check.Gpu, kernels: ?[]const u8) !void {
+        const gpa = gpu.gpa;
+        env.gpa = gpa;
+        env.stream = try cuda.Stream.init(gpu.d, true);
+        errdefer env.stream.deinit();
+        env.k = try kern.Kernels.load(gpa, gpu.io, gpu.ctx, kernels, geometry.linear_v_heads);
+        errdefer env.k.deinit();
+        env.scratch = try st.Scratch.init(gpa, gpu.d, geometry, 256, capacity);
+        errdefer env.scratch.deinit();
+        const o: kern.Ops = .{ .k = &env.k, .s = env.stream };
+        env.seqs = try gpa.alloc(st.Seq, st.max_streams);
+        errdefer gpa.free(env.seqs);
+        env.made = 0;
+        errdefer for (env.seqs[0..env.made]) |*sq| sq.deinit();
+        for (env.seqs) |*sq| {
+            sq.* = try st.Seq.init(gpa, o, geometry, capacity);
+            env.made += 1;
+        }
+        const part_elems = env.scratch.part_chunks * st.round_rows * H;
+        const variants = if (env.k.triton) |t| t.variants.len else 0;
+        env.rig = .{
+            .gpu = gpu,
+            .s = env.stream,
+            .k = &env.k,
+            .scratch = &env.scratch,
+            .seqs = env.seqs,
+            .home = undefined,
+            .pool = undefined,
+            .q = try cuda.DeviceBuffer.alloc(gpu.d, 16),
+            .kn = try cuda.DeviceBuffer.alloc(gpu.d, 16),
+            .vn = try cuda.DeviceBuffer.alloc(gpu.d, 16),
+            .out = .{ try cuda.DeviceBuffer.alloc(gpu.d, st.round_rows * H * D * 2), try cuda.DeviceBuffer.alloc(gpu.d, st.round_rows * H * D * 2) },
+            .part = undefined,
+            .nat = try native.Native.load(gpu.d, try gpu.ctx.capability()),
+            .prng = std.Random.DefaultPrng.init(0x7ee_a77e),
+            .covered = try gpa.alloc(bool, variants),
+        };
+        const rig = &env.rig;
+        @memset(rig.covered, false);
+        for (env.seqs, &rig.home) |sq, *h| h.* = .{ sq.keys[3], sq.values[3] };
+        for (&rig.part) |*b| b.* = .{ .o = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * D * 4), .m = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4), .l = try cuda.DeviceBuffer.alloc(gpu.d, part_elems * 4) };
+        for (&rig.pool, 0..) |*pr, i| for (pr) |*b| {
+            b.* = try rig.fresh(capacity * kv_row + 16 * 4096, i == 1, 1.0);
+        };
+        try env.stream.synchronize();
+    }
+
+    pub fn deinit(env: *Env) void {
+        env.gpa.free(env.rig.covered);
+        env.rig.nat.deinit();
+        for (env.seqs[0..env.made]) |*sq| sq.deinit();
+        env.gpa.free(env.seqs);
+        env.scratch.deinit();
+        env.k.deinit();
+        env.stream.deinit();
+    }
+};
+
+pub fn run(gpu: check.Gpu, kernels: []const u8, rounds: usize) !void {
+    var env: Env = undefined;
+    try env.init(gpu, kernels);
+    defer env.deinit();
+    const rig = &env.rig;
+    const k = &env.k;
+    grid(rig);
     std.debug.print("grid: {d} cases, {d} comparisons, {d} differ, {d} skipped (no captured variant)\n", .{ rig.cases, rig.comparisons, rig.bad, rig.skipped });
     const before = rig.bad;
-    lanes(&rig, rounds);
+    lanes(rig, rounds);
     std.debug.print("lanes: {d} cases so far, {d} differ\n", .{ rig.cases, rig.bad - before });
-    for (0..k.triton.?.variants.len) |vi| variant(&rig, vi) catch |e| {
+    for (0..k.triton.?.variants.len) |vi| variant(rig, vi) catch |e| {
         std.debug.print("  variant {d} failed: {t}\n", .{ vi, e });
         rig.bad += 1;
     };
-    for ([_]Spec{ .{ .p = 4096, .w = 1 }, .{ .p = 4096, .w = 16 }, .{ .p = 8191, .w = 1 }, .{ .p = 8191, .w = 16 }, .{ .p = 8191, .w = 64 } }) |sp| try timing(&rig, &.{sp});
+    for ([_]Spec{ .{ .p = 4096, .w = 1 }, .{ .p = 4096, .w = 16 }, .{ .p = 8191, .w = 1 }, .{ .p = 8191, .w = 16 }, .{ .p = 8191, .w = 64 } }) |sp| try timing(rig, &.{sp});
     var missing: usize = 0;
     for (k.triton.?.variants, rig.covered) |v, c| {
         const f = v.spec.@"fn";
