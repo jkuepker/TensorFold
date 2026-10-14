@@ -49,3 +49,14 @@ against the Python extension's builds from the capture run's `torch_ext` (`sass_
 
 Runs any command on the GPU with journal lines, typically the `tensorfold run` built by step 4 against the
 kernel set from step 3.
+
+## 6. lanes_check.py: concurrent streams on the served engine (GPU)
+
+`python3 zig/tests/cuda/nemotron/lanes_check.py URL [PAIRS]`
+
+Against `tensorfold-native serve <checkpoint> --name local-model --parallel 2 --context 8192 --temperature 0
+--no-thinking` (drafts on; run it with the prompt cache on and with `--prompt-cache-gib 0`). It asks six short
+prompts one at a time, then sends PAIRS (default 20) pairs of different prompts at the same moment, and passes
+only when every concurrent greedy reply equals the same prompt's solo reply. It guards the lane host's admission:
+two streams admitted in one round open one at a time here (the Nemotron lane backend draws its first token from the
+last prompt pass), where the Qwen3.6 and MiniCPM-V lane backend opens them together (`open_together`).
