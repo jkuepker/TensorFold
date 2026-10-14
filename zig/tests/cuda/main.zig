@@ -18,7 +18,10 @@ const grouped_tests = @import("grouped_tests.zig");
 const qwen35_router_tests = @import("qwen35_router_tests.zig");
 const qwen_glue_tests = @import("qwen_glue_tests.zig");
 const qwen_prep_tests = @import("qwen_prep_tests.zig");
+const qwen_prep_f64_tests = @import("qwen_prep_f64_tests.zig");
 const qwen_attention_tests = @import("qwen_attention_tests.zig");
+const qwen_attention_f64_tests = @import("qwen_attention_f64_tests.zig");
+const qwen_gdn_f64_tests = @import("qwen_gdn_f64_tests.zig");
 const qwen36_tests = @import("qwen36_tests.zig");
 const qwen36_mtp_tests = @import("qwen36_mtp_tests.zig");
 const qmm_group_tests = @import("qmm_group_tests.zig");
@@ -68,6 +71,9 @@ const usage =
     \\  qwen-glue <aot> [oracle] Qwen3.6 row glue (add_rmsnorm, gated_norm, gate_mul, group_sums, paths, embed): built-in kernels vs the captured Triton launches, every output byte
     \\  qwen35-router <aot> <dir> [rounds] Qwen3.6 router: Triton replay vs Python bytes (qwen35/capture_router.py), native vs both
     \\  qwen-prep <aot>           Qwen3.6 gdn_pre and attn_prep: native vs every captured Triton variant, byte for byte (synthetic rows)
+    \\  qwen-prep-f64 [aot]      Qwen3.6 gdn_pre and attn_prep vs float64 references, per-column error (aot: also the Triton launches)
+    \\  qwen-attention-f64 [aot] [rounds] Qwen3.6 tree attention vs a float64 softmax attention: output and partial slots, per-column error
+    \\  qwen-gdn-f64             Qwen3.6 GDN tree, prompt chain and replay kernels vs a float64 recurrence, per-column error
     \\  qwen-attention <aot> [rounds] Qwen3.6 tree attention: native _shared, _tail, _merge vs the captured Triton launches, byte for byte
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
@@ -171,6 +177,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-glue")) return qwen_glue_tests.run(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else null);
     if (std.mem.eql(u8, cmd, "qwen35-router")) return qwen35_router_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 240);
     if (std.mem.eql(u8, cmd, "qwen-prep")) return qwen_prep_tests.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "qwen-prep-f64")) return qwen_prep_f64_tests.run(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "qwen-attention-f64")) return qwen_attention_f64_tests.run(gpu, if (rest.len > 0) rest[0] else null, if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 8);
+    if (std.mem.eql(u8, cmd, "qwen-gdn-f64")) return qwen_gdn_f64_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "qwen-attention")) return qwen_attention_tests.run(gpu, try arg(rest, 0), if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 120);
     if (std.mem.eql(u8, cmd, "carveout")) {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;

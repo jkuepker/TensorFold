@@ -8,11 +8,11 @@ const check = @import("check.zig");
 const tri = qwen27.triton;
 const prep = qwen27.prep_native;
 
-const rows_max = 4096;
-const streams = 16;
-const keep = 3;
-const gdn_shape: tri.Gdn = .{ .c = 8192, .kh = 16, .vh = 32, .dk = 128, .keep = keep };
-const attn_shape: tri.Attn = .{ .heads = 16, .kv_heads = 2, .dim = 256, .half = 32 };
+pub const rows_max = 4096;
+pub const streams = 16;
+pub const keep = 3;
+pub const gdn_shape: tri.Gdn = .{ .c = 8192, .kh = 16, .vh = 32, .dk = 128, .keep = keep };
+pub const attn_shape: tri.Attn = .{ .heads = 16, .kv_heads = 2, .dim = 256, .half = 32 };
 
 // Every row count the engine serves (decode, lane and verify rows, prompt chunks up to 4096), the odd ones the capture never launched too.
 const row_counts = blk: {
@@ -29,21 +29,21 @@ const row_counts = blk: {
     break :blk l[0..n].*;
 };
 
-fn bf16(v: f32) u16 {
+pub fn bf16(v: f32) u16 {
     const u: u32 = @bitCast(v);
     if (std.math.isNan(v)) return 0x7fc0;
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
 // A device buffer padded 0xff on both sides; `shifted` puts the data 4 bytes past a 16-byte boundary, as Triton's specialization sees it.
-const Buf = struct {
+pub const Buf = struct {
     b: cuda.DeviceBuffer,
     off: usize,
 
-    fn ptr(x: Buf) u64 {
+    pub fn ptr(x: Buf) u64 {
         return x.b.ptr + x.off;
     }
-    fn free(x: *Buf) void {
+    pub fn free(x: *Buf) void {
         x.b.free();
     }
 };
@@ -94,17 +94,17 @@ const Rig = struct {
     }
 };
 
-fn shifted(v: anytype, name: []const u8) bool {
+pub fn shifted(v: anytype, name: []const u8) bool {
     for (v.spec.params) |p| if (std.mem.eql(u8, p.name, name)) return !p.div16;
     return false;
 }
 
-fn constOf(v: anytype, name: []const u8) i64 {
+pub fn constOf(v: anytype, name: []const u8) i64 {
     return v.spec.consts.map.get(name).?.int.?;
 }
 
 // A random bf16 array: a scale per `block` values from `scales`, a rare outlier of 30 times that.
-fn fillScaled(rng: std.Random, out: []u16, block: usize, scales: []const f32) void {
+pub fn fillScaled(rng: std.Random, out: []u16, block: usize, scales: []const f32) void {
     var i: usize = 0;
     while (i < out.len) : (i += block) {
         const sc = scales[rng.uintLessThan(usize, scales.len)];
@@ -121,7 +121,7 @@ fn dtbAt(wild: bool, h: usize) f32 {
     return (k - 15.5) * (if (wild) @as(f32, 0.45) else 0.07);
 }
 
-const Gdn = struct {
+pub const Gdn = struct {
     qkv: []u16,
     cs: []u16,
     cw: []u16,
@@ -132,7 +132,7 @@ const Gdn = struct {
     win: [2][]i32, // [kind]: 0 one stream's linear windows (segments for MULTI), 1 random causal windows
     sid: [2][]i32,
 
-    fn make(gpa: std.mem.Allocator, rng: std.Random, wild: bool) !Gdn {
+    pub fn make(gpa: std.mem.Allocator, rng: std.Random, wild: bool) !Gdn {
         const sc: []const f32 = if (wild) &.{ 0.01, 1, 8, 64, 1000 } else &.{ 0.02, 0.5, 1, 1, 4 };
         var g: Gdn = undefined;
         g.qkv = try gpa.alloc(u16, rows_max * gdn_shape.c);
@@ -187,7 +187,7 @@ const Gdn = struct {
         return g;
     }
 
-    fn free(g: *Gdn, gpa: std.mem.Allocator) void {
+    pub fn free(g: *Gdn, gpa: std.mem.Allocator) void {
         for ([_][]u16{ g.qkv, g.cs, g.cw, g.a, g.b }) |x| gpa.free(x);
         for (g.win) |x| gpa.free(x);
         for (g.sid) |x| gpa.free(x);
@@ -234,7 +234,7 @@ fn gdnVariant(r: *Rig, v: anytype, g: *const Gdn, set: usize) !void {
     }
 }
 
-const Attn = struct {
+pub const Attn = struct {
     qg: []u16,
     kv: []u16,
     qn: [256]u16,
@@ -242,7 +242,7 @@ const Attn = struct {
     pos: []i32,
     inv: [32]f32,
 
-    fn make(gpa: std.mem.Allocator, rng: std.Random, wild: bool) !Attn {
+    pub fn make(gpa: std.mem.Allocator, rng: std.Random, wild: bool) !Attn {
         const sc: []const f32 = if (wild) &.{ 1e-20, 0.01, 1, 30, 1e19 } else &.{ 0.05, 1, 1, 3 };
         var t: Attn = undefined;
         t.qg = try gpa.alloc(u16, rows_max * 16 * 2 * 256);
@@ -272,7 +272,7 @@ const Attn = struct {
         return t;
     }
 
-    fn free(t: *Attn, gpa: std.mem.Allocator) void {
+    pub fn free(t: *Attn, gpa: std.mem.Allocator) void {
         gpa.free(t.qg);
         gpa.free(t.kv);
         gpa.free(t.pos);
